@@ -1,4 +1,4 @@
-﻿#include "GrapplingHookTool.h"
+#include "GrapplingHookTool.h"
 
 #include "CableComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -29,6 +29,11 @@ FVector2f PaniniProjection(const FVector2f OM, float d, float s)
 
 void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* Tool, const FVector& ShootingSourceLocation, const FVector& PlayerAimDirection)
 {
+	if (!Tool)
+	{
+		return;
+	}
+	
 	if (!Tool->GrappleProjectile)
 	{
 		FVector SourceLocation = ShootingSourceLocation;
@@ -50,7 +55,7 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 		}
 		
 		Tool->GrappleProjectile = GetWorld()->SpawnActor<AGrappleProjectile>(Tool->GrappleProjectileClass);
-		Tool->GrappleProjectile->SetActorLocation(ShootingSourceLocation + PlayerAimDirection * 150);
+		Tool->GrappleProjectile->SetActorLocation(SourceLocation);
 		Tool->GrappleProjectile->SetInitialVelocity(PlayerAimDirection * Tool->InitialHookVelocity);
 		Tool->GrappleProjectile->OnProjectileImpactEvent.AddDynamic(Tool, &AGrapplingHookTool::OnGrappleHitSurface);
 		Tool->OnRep_GrappleProjectile();
@@ -59,6 +64,10 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 
 void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* Tool)
 {
+	if (!Tool)
+	{
+		return;
+	}
 	if (Tool->GrappleProjectile)
 	{
 		Tool->GrappleProjectile->Destroy();
@@ -71,6 +80,11 @@ void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* 
 
 void UGrapplingHookRCO::ServerProcessDesiredCableLengthQueries_Implementation(AGrapplingHookTool* Tool, int32 Queries, float DeltaSeconds)
 {
+	if (!Tool)
+	{
+		return;
+	}
+	
 	if (Queries != 0)
 	{
 		float TargetLength = Tool->DesiredCableLength + Tool->CableLengthControlStep * Queries * DeltaSeconds;
