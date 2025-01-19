@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "FGRemoteCallObject.h"
@@ -25,7 +25,7 @@ public:
 	void ServerRetractGrapple(AGrapplingHookTool* Tool);
 	
 	UFUNCTION(Server, Reliable)
-	void ServerProcessDesiredCableLengthQueries(AGrapplingHookTool* Tool, int32 Queries, float DeltaSeconds);
+	void ServerProcessDesiredCableLengthQueries(AGrapplingHookTool* Tool, float QueriedChange, float DeltaSeconds);
 
 private:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
@@ -95,7 +95,7 @@ protected:
 	FVector GetGrappleForcePoint() const;
 
 	UFUNCTION(BlueprintPure)
-	int32 GetDesiredCableLengthQueries() const;
+	float GetDesiredCableLengthQueries() const;
 
 	UFUNCTION(BlueprintImplementableEvent)
 	void OnGrappleFired();
@@ -108,6 +108,9 @@ protected:
 
 	UFUNCTION(BlueprintImplementableEvent)
 	void OnDesiredCableLengthChanged(float NewRatio);
+
+	UFUNCTION(BlueprintImplementableEvent)
+	float GetCableLengthControlStep() const;
 
 	// Returns component to which cable's end should be attached. Optionally can provide a socket with CableAttachComponentSocket property. 
 	UFUNCTION(BlueprintNativeEvent)
@@ -148,9 +151,6 @@ protected:
 	// Max allowed cable's desired length. 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
 	float MaxCableLength = 6000;
-	// Cable length in cm/s that would be subtracted/added from/to desired length by respective inputs.
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
-	float CableLengthControlStep = 500;
 	// Cable gravity multiplier applied after projectile was shot but it didnt hit anything yet. 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
 	float CableGravityScaleBeforeHit = 0;
@@ -181,7 +181,7 @@ private:
 	float DesiredCableLength = 0;
 
 	// Stacked length control inputs; will be processed and zerofied at Tick.
-	int32 DesiredCableLengthControlQuery = 0;
+	float DesiredCableLengthControlQuery = 0;
 
 	// Whether grapple projectile is sticked to something.
 	UPROPERTY(Transient, ReplicatedUsing=OnRep_GrappleAttached)
