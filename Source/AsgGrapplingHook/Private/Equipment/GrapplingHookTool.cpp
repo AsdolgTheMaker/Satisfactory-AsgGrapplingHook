@@ -78,17 +78,17 @@ void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* 
 	Tool->OnRep_DesiredCableLength();
 }
 
-void UGrapplingHookRCO::ServerProcessDesiredCableLengthQueries_Implementation(AGrapplingHookTool* Tool, int32 Queries, float DeltaSeconds)
+void UGrapplingHookRCO::ServerProcessDesiredCableLengthQueries_Implementation(AGrapplingHookTool* Tool, float QueriedChange, float DeltaSeconds)
 {
 	if (!Tool)
 	{
 		return;
 	}
 	
-	if (Queries != 0)
+	if (!FMath::IsNearlyZero(QueriedChange))
 	{
-		float TargetLength = Tool->DesiredCableLength + Tool->CableLengthControlStep * Queries * DeltaSeconds;
-		if (Queries < 0)
+		float TargetLength = Tool->DesiredCableLength + QueriedChange * DeltaSeconds;
+		if (QueriedChange < 0)
 		{
 			TargetLength = FMath::Min(Tool->DesiredCableLength, // decreasing length must never make it larger than current
 				FMath::Max(Tool->GetDistanceToGrappleForcePoint() - 600, // length cannot be too smaller than actual length to avoid slingshot situation  
@@ -284,7 +284,7 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 	if (bGrappleAttached)
 	{
 		// Apply length control queries to desired cable length 
-		if (DesiredCableLengthControlQuery != 0)
+		if (!FMath::IsNearlyZero(DesiredCableLengthControlQuery))
 		{
 			if (UGrapplingHookRCO* RCO = Cast<AFGPlayerController>(GetInstigatorController())->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
 			{
@@ -361,7 +361,7 @@ void AGrapplingHookTool::HandleInput_RetractCable()
 		return;
 	}
 
-	DesiredCableLengthControlQuery -= 1;
+	DesiredCableLengthControlQuery -= GetCableLengthControlStep();
 }
 
 void AGrapplingHookTool::HandleInput_ExtendCable()
@@ -371,7 +371,7 @@ void AGrapplingHookTool::HandleInput_ExtendCable()
 		return;
 	}
 
-	DesiredCableLengthControlQuery += 1;
+	DesiredCableLengthControlQuery += GetCableLengthControlStep();
 }
 
 void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds, const bool bPropagateOverNetwork)
@@ -444,7 +444,7 @@ FVector AGrapplingHookTool::GetGrappleForcePoint() const
 	return GrappleProjectile->GetActorLocation();
 }
 
-int32 AGrapplingHookTool::GetDesiredCableLengthQueries() const
+float AGrapplingHookTool::GetDesiredCableLengthQueries() const
 {
 	return DesiredCableLengthControlQuery;
 }
