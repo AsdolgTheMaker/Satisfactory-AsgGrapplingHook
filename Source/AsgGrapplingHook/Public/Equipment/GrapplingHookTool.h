@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "FGRemoteCallObject.h"
@@ -111,6 +111,9 @@ protected:
 
 	UFUNCTION(BlueprintImplementableEvent)
 	float GetCableLengthControlStep() const;
+	
+	float GetMaxCableLength() const;
+	float GetTearingDistance() const;
 
 	// Returns component to which cable's end should be attached. Optionally can provide a socket with CableAttachComponentSocket property. 
 	UFUNCTION(BlueprintNativeEvent)
@@ -148,9 +151,6 @@ protected:
 	// Socket name to which cable's end will be attached. Target component defined by GetCableAttachComponent implementation.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
 	FName CableAttachComponentSocket;
-	// Max allowed cable's desired length. 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
-	float MaxCableLength = 6000;
 	// Cable gravity multiplier applied after projectile was shot but it didnt hit anything yet. 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
 	float CableGravityScaleBeforeHit = 0;

@@ -1,10 +1,11 @@
-#include "GrapplingHookTool.h"
+﻿#include "GrapplingHookTool.h"
 
 #include "CableComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "FGEnhancedInputComponent.h"
 #include "FGInputMappingContext.h"
 #include "FGPlayerController.h"
+#include "SessionSettingsManager.h"
 #include "UnrealNetwork.h"
 #include "Components/SphereComponent.h"
 #include "Kismet/KismetSystemLibrary.h"
@@ -53,10 +54,14 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 		{
 			SourceLocation = ShootingSourceLocation + PlayerAimDirection * 150;
 		}
+
+		// Take player's velocity projected on shooting vector, so the projectile inherits player speed in that direction (so we never have a situation when player is faster than the projectile, unless terminal velocity is involved) 
+		const FVector PlayerVelocity = Player->GetFGMovementComponent()->Velocity;
+		const FVector PlayerVelocityOnShootingDir = PlayerVelocity.ProjectOnToNormal(PlayerAimDirection);
 		
 		Tool->GrappleProjectile = GetWorld()->SpawnActor<AGrappleProjectile>(Tool->GrappleProjectileClass);
 		Tool->GrappleProjectile->SetActorLocation(SourceLocation);
-		Tool->GrappleProjectile->SetInitialVelocity(PlayerAimDirection * Tool->InitialHookVelocity);
+		Tool->GrappleProjectile->SetInitialVelocity(PlayerAimDirection * Tool->InitialHookVelocity + PlayerVelocityOnShootingDir);
 		Tool->GrappleProjectile->OnProjectileImpactEvent.AddDynamic(Tool, &AGrapplingHookTool::OnGrappleHitSurface);
 		Tool->OnRep_GrappleProjectile();
 	}
@@ -96,7 +101,7 @@ void UGrapplingHookRCO::ServerProcessDesiredCableLengthQueries_Implementation(AG
 		}
 		else
 		{
-			TargetLength = FMath::Min(Tool->MaxCableLength, TargetLength); // length cannot exceed certain maximum value
+			TargetLength = FMath::Min(Tool->GetMaxCableLength(), TargetLength); // length cannot exceed certain maximum value
 		}
 		
 		Tool->DesiredCableLength = TargetLength;
@@ -150,18 +155,26 @@ void AGrapplingHookTool::ServerTickGrapple_Implementation(const float DeltaSecon
 	{
 		// Return grapple if the shot exceeded maximum allowed cable length
 		const float ActualCurrentCableLength = GetDistanceToGrappleForcePoint();
-		if (ActualCurrentCableLength > MaxCableLength)
+		if (ActualCurrentCableLength > GetMaxCableLength())
 		{
 			RetractGrapple();
 			return;
 		}
 
 		// Update cable length until max length is reached (or projectile hits something)
-		SetCableLength(FMath::Max(0.1, FMath::Min(MaxCableLength, ActualCurrentCableLength))); 
+		SetCableLength(FMath::Max(0.1, FMath::Min(GetMaxCableLength(), ActualCurrentCableLength))); 
 	}
 
 	if (bGrappleAttached)
 	{
+		// If player is over tearing distance, retract the grapple
+		if (const float DistanceOvershoot = GetDistanceToGrappleForcePoint() - DesiredCableLength;
+			DistanceOvershoot >= GetTearingDistance())
+		{
+			RetractGrapple();
+			return;
+		}
+		
 		// Run physics simulation on server (has authority over client simulations, if any are running)
 		TickTensionForce(DeltaSeconds, true);
 
@@ -308,7 +321,7 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 			if (FHitResult HitResult;
 				World->LineTraceSingleByProfile(HitResult,
 					GetShootingSourceLocation(),
-					GetShootingSourceLocation() + Player->GetBaseAimRotation().Vector() * MaxCableLength,
+					GetShootingSourceLocation() + Player->GetBaseAimRotation().Vector() * GetMaxCableLength(),
 					"Projectile", QueryParams))
 			{
 				bShowCrosshairHighlight = true;
@@ -387,20 +400,37 @@ void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds, const bool b
 				const FVector TensionForceDirection = (GetGrappleForcePoint() - ToolOwner->GetActorLocation()).GetSafeNormal();
 				const FVector TensionForce = (-Movement->GetVelocity()).ProjectOnTo(TensionForceDirection);
 
+				FVector DesiredVelocity = Movement->Velocity;
+
 				// Apply tension force, if its direction is facing grapple point
 				if (FMath::IsNearlyEqual(FVector::DotProduct(TensionForceDirection, TensionForce.GetSafeNormal()), 1.0f, 1e-06))
 				{
 					// In air, we make the rope feel stretchable by applying the force over time instead of instantly
 					// On the ground however it's a different story, because player has friction, tfw much more resistance to external forces - we apply full force immediately.
-					const float TimeMultiplier = Movement->IsMovingOnGround() ? 1 : DeltaSeconds*3;
-					Movement->Velocity += TensionForce * TimeMultiplier;  
+					const float TimeMultiplier = Movement->MovementMode == MOVE_Walking ? 1 : DeltaSeconds*3;
+					DesiredVelocity += TensionForce * TimeMultiplier;  
 				}
 
 				// If cable is longer than desired length allows, tension should pull player towards grapple point
 				if (ActualCurrentCableLength > DesiredCableLength)
 				{
 					const float ExcessDistance = ActualCurrentCableLength - DesiredCableLength;
-					Movement->Velocity += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
+					DesiredVelocity += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
+				}
+
+				// Apply velocity to movement comp
+				Movement->Velocity = DesiredVelocity;
+
+				// Help player to automatically take off the ground if floor normal to tension force angle is less than ~43 degrees 
+				if (Movement->MovementMode == MOVE_Walking)
+				{
+					const float Dot = FMath::Clamp(FVector::DotProduct(Movement->CurrentFloor.HitResult.Normal, TensionForceDirection), -1.0f, 1.0f);
+					const float FloorNormalToTensionDirAngle = FMath::Acos(Dot); 
+					if (FloorNormalToTensionDirAngle < (PI/4 - PI/64))
+					{
+						Movement->MovementMode = MOVE_Falling;
+						Movement->CurrentFloor.Clear();
+					}
 				}
 
 				if (bPropagateOverNetwork)
@@ -447,6 +477,18 @@ FVector AGrapplingHookTool::GetGrappleForcePoint() const
 float AGrapplingHookTool::GetDesiredCableLengthQueries() const
 {
 	return DesiredCableLengthControlQuery;
+}
+
+float AGrapplingHookTool::GetMaxCableLength() const
+{
+	const USessionSettingsManager* SessionSettings = GetWorld()->GetSubsystem<USessionSettingsManager>();
+	return SessionSettings->GetFloatOptionValue("AsgGrapplingHook.MaxCableLength");
+}
+
+float AGrapplingHookTool::GetTearingDistance() const
+{
+	const USessionSettingsManager* SessionSettings = GetWorld()->GetSubsystem<USessionSettingsManager>();
+	return SessionSettings->GetFloatOptionValue("AsgGrapplingHook.TearingDistance");
 }
 
 USceneComponent* AGrapplingHookTool::GetCableAttachComponent_Implementation() const
@@ -500,5 +542,5 @@ void AGrapplingHookTool::OnRep_GrappleAttached()
 
 void AGrapplingHookTool::OnRep_DesiredCableLength()
 {
-	OnDesiredCableLengthChanged(DesiredCableLength / MaxCableLength);
+	OnDesiredCableLengthChanged(DesiredCableLength / GetMaxCableLength());
 }
