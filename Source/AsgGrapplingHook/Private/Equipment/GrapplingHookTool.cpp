@@ -5,6 +5,7 @@
 #include "FGEnhancedInputComponent.h"
 #include "FGInputMappingContext.h"
 #include "FGPlayerController.h"
+#include "FGSchematicManager.h"
 #include "SessionSettingsManager.h"
 #include "UnrealNetwork.h"
 #include "Components/SphereComponent.h"
@@ -61,7 +62,7 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 		
 		Tool->GrappleProjectile = GetWorld()->SpawnActor<AGrappleProjectile>(Tool->GrappleProjectileClass);
 		Tool->GrappleProjectile->SetActorLocation(SourceLocation);
-		Tool->GrappleProjectile->SetInitialVelocity(PlayerAimDirection * Tool->InitialHookVelocity + PlayerVelocityOnShootingDir);
+		Tool->GrappleProjectile->SetInitialVelocity(PlayerAimDirection * Tool->GetInitialHookVelocity() + PlayerVelocityOnShootingDir);
 		Tool->GrappleProjectile->OnProjectileImpactEvent.AddDynamic(Tool, &AGrapplingHookTool::OnGrappleHitSurface);
 		Tool->OnRep_GrappleProjectile();
 	}
@@ -115,6 +116,29 @@ void UGrapplingHookRCO::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(UGrapplingHookRCO, bDummy);
+}
+
+float FGrapplingHookUpgradesChain::GetActiveValue(const UObject* Context) const
+{
+	return GetActiveValue(Context->GetWorld());
+}
+
+float FGrapplingHookUpgradesChain::GetActiveValue(UWorld* Context) const
+{
+	float ActiveValue = BaseValue;
+	const AFGSchematicManager* SchematicManager = AFGSchematicManager::Get(Context);
+	for (const TTuple<TSubclassOf<UFGSchematic>, float> Upgrade : Upgrades)
+	{
+		if (SchematicManager->IsSchematicPurchased(Upgrade.Key))
+		{
+			ActiveValue = Upgrade.Value;
+		}
+		else
+		{
+			break;
+		}
+	}
+	return ActiveValue;
 }
 
 AGrapplingHookTool::AGrapplingHookTool()
@@ -205,12 +229,10 @@ void AGrapplingHookTool::LoadFromItemState_Implementation(const FFGDynamicStruct
 {
 	Super::LoadFromItemState_Implementation(itemState);
 	// TODO: maybe save/load projectile and its cable states?	
-	UKismetSystemLibrary::PrintString(this, "Grapple load from item state");
 }
 
 FFGDynamicStruct AGrapplingHookTool::SaveToItemState_Implementation() const
 { 
-	UKismetSystemLibrary::PrintString(this, "Grapple save to item state");	
 	// TODO: maybe save/load projectile and its cable states?
 	return Super::SaveToItemState_Implementation();
 
@@ -479,16 +501,24 @@ float AGrapplingHookTool::GetDesiredCableLengthQueries() const
 	return DesiredCableLengthControlQuery;
 }
 
+float AGrapplingHookTool::GetCableLengthControlStep() const
+{
+	return UpgradesSpeed.GetActiveValue(this);
+}
+
 float AGrapplingHookTool::GetMaxCableLength() const
 {
-	const USessionSettingsManager* SessionSettings = GetWorld()->GetSubsystem<USessionSettingsManager>();
-	return SessionSettings->GetFloatOptionValue("AsgGrapplingHook.MaxCableLength");
+	return UpgradesLength.GetActiveValue(this);
 }
 
 float AGrapplingHookTool::GetTearingDistance() const
 {
-	const USessionSettingsManager* SessionSettings = GetWorld()->GetSubsystem<USessionSettingsManager>();
-	return SessionSettings->GetFloatOptionValue("AsgGrapplingHook.TearingDistance");
+	return UpgradesDurability.GetActiveValue(this);
+}
+
+float AGrapplingHookTool::GetInitialHookVelocity() const
+{
+	return UpgradesPower.GetActiveValue(this);
 }
 
 USceneComponent* AGrapplingHookTool::GetCableAttachComponent_Implementation() const

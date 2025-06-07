@@ -36,6 +36,22 @@ private:
 	bool bDummy = true;
 };
 
+USTRUCT(BlueprintType)
+struct FGrapplingHookUpgradesChain
+{
+	GENERATED_BODY()
+
+public:
+	float GetActiveValue(const UObject* Context) const;
+	float GetActiveValue(UWorld* Context) const;
+	
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BaseValue = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TMap<TSubclassOf<UFGSchematic>, float> Upgrades;
+};
+
 UCLASS(Abstract)
 class ASGGRAPPLINGHOOK_API AGrapplingHookTool : public AFGEquipment
 {
@@ -109,11 +125,10 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent)
 	void OnDesiredCableLengthChanged(float NewRatio);
 
-	UFUNCTION(BlueprintImplementableEvent)
 	float GetCableLengthControlStep() const;
-	
 	float GetMaxCableLength() const;
 	float GetTearingDistance() const;
+	float GetInitialHookVelocity() const;
 
 	// Returns component to which cable's end should be attached. Optionally can provide a socket with CableAttachComponentSocket property. 
 	UFUNCTION(BlueprintNativeEvent)
@@ -144,9 +159,15 @@ protected:
 	// Projectile that will be shot from the tool.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Projectile")
 	TSubclassOf<AGrappleProjectile> GrappleProjectileClass = nullptr;
-	// Speed at which grapple projectile will be shot.
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Projectile")
-	float InitialHookVelocity = 6000.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Upgrades")
+	FGrapplingHookUpgradesChain UpgradesLength;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Upgrades")
+	FGrapplingHookUpgradesChain UpgradesPower;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Upgrades")
+	FGrapplingHookUpgradesChain UpgradesSpeed;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Upgrades")
+	FGrapplingHookUpgradesChain UpgradesDurability;
 	
 	// Socket name to which cable's end will be attached. Target component defined by GetCableAttachComponent implementation.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Cable")
