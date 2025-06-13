@@ -76,3 +76,5 @@ Also yes, you can attach yourself to other players.
 ### 🗈 Feedback & Reports
 
 If there is something you want to ask or report, please reach out to **@asdolg** in [Satisfactory Modding Discord server](https://discord.gg/R85q7SrtUD).
+
+If the mod is broken due to game's update and I don't respond in a month, feel free to take over to maintain/update.
