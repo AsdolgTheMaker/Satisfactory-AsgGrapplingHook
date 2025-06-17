@@ -38,10 +38,22 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 	
 	if (!Tool->GrappleProjectile)
 	{
+		// Bail out if some necessary stuff doesn't exist yet (may happen for clients somehow)
+		AFGCharacterPlayer* Player = Tool->GetInstigatorCharacter();
+		if (!Player)
+		{
+			return;
+		}
+		UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent();
+		if (!Movement)
+		{
+			return;	
+		}
+		
 		FVector SourceLocation = ShootingSourceLocation;
 		FCollisionQueryParams QueryParams;
-		AFGCharacterPlayer* Player = Tool->GetInstigatorCharacter();
 		QueryParams.AddIgnoredActor(Player);
+
 		
 		if (FHitResult HitResult;
 			GetWorld()->LineTraceSingleByProfile(HitResult,
@@ -57,7 +69,7 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 		}
 
 		// Take player's velocity projected on shooting vector, so the projectile inherits player speed in that direction (so we never have a situation when player is faster than the projectile, unless terminal velocity is involved) 
-		const FVector PlayerVelocity = Player->GetFGMovementComponent()->Velocity;
+		const FVector PlayerVelocity = Movement->Velocity;
 		const FVector PlayerVelocityOnShootingDir = PlayerVelocity.ProjectOnToNormal(PlayerAimDirection);
 		
 		Tool->GrappleProjectile = GetWorld()->SpawnActor<AGrappleProjectile>(Tool->GrappleProjectileClass);
