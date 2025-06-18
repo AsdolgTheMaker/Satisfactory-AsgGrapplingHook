@@ -139,6 +139,10 @@ float FGrapplingHookUpgradesChain::GetActiveValue(UWorld* Context) const
 {
 	float ActiveValue = BaseValue;
 	const AFGSchematicManager* SchematicManager = AFGSchematicManager::Get(Context);
+	if (!SchematicManager)
+	{
+		return BaseValue;
+	}
 	for (const TTuple<TSubclassOf<UFGSchematic>, float> Upgrade : Upgrades)
 	{
 		if (SchematicManager->IsSchematicPurchased(Upgrade.Key))
