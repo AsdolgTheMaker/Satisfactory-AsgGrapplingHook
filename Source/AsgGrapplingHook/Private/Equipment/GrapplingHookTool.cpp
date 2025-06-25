@@ -318,14 +318,17 @@ void AGrapplingHookTool::AddEquipmentActionBindings()
 
 void AGrapplingHookTool::RetractGrapple()
 {
-	if (UGrapplingHookRCO* RCO = Cast<AFGPlayerController>(GetInstigatorController())->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+	if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
 	{
-		RCO->ServerRetractGrapple(this);
-		if (!bRetracted)
+		if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
 		{
-			bRetracted = true;
-			OnGrappleStartedRetracting();
-			OnGrappleFinishedRetracting();
+			RCO->ServerRetractGrapple(this);
+			if (!bRetracted)
+			{
+				bRetracted = true;
+				OnGrappleStartedRetracting();
+				OnGrappleFinishedRetracting();
+			}
 		}
 	}
 }
@@ -337,11 +340,14 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 		// Apply length control queries to desired cable length 
 		if (!FMath::IsNearlyZero(DesiredCableLengthControlQuery))
 		{
-			if (UGrapplingHookRCO* RCO = Cast<AFGPlayerController>(GetInstigatorController())->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+			if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
 			{
-				// Length adjustment is processed on server first, and is replicated back to client afterwards
-				RCO->ServerProcessDesiredCableLengthQueries(this, DesiredCableLengthControlQuery, DeltaSeconds);
-				DesiredCableLengthControlQuery = 0;
+				if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+				{
+					// Length adjustment is processed on server first, and is replicated back to client afterwards
+					RCO->ServerProcessDesiredCableLengthQueries(this, DesiredCableLengthControlQuery, DeltaSeconds);
+					DesiredCableLengthControlQuery = 0;
+				}
 			}
 		}
 	}
@@ -382,25 +388,27 @@ void AGrapplingHookTool::SetInstigatorVelocity_Implementation(const FVector& New
 
 void AGrapplingHookTool::HandleInput_PrimaryFire()
 {
-
-	if (UGrapplingHookRCO* RCO = Cast<AFGPlayerController>(GetInstigatorController())->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+	if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
 	{
-		if (!GrappleProjectile) // shoot projectile if didn't yet
+		if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
 		{
-			const AFGCharacterPlayer* Player = GetInstigatorCharacter();
-			if (!Player)
+			if (!GrappleProjectile) // shoot projectile if didn't yet
 			{
-				return;
-			}
+				const AFGCharacterPlayer* Player = GetInstigatorCharacter();
+				if (!Player)
+				{
+					return;
+				}
 
-			bRetracted = false;
-			const FVector PlayerDirection = Player->GetBaseAimRotation().Vector();
-			RCO->ServerShootGrapple(this, GetShootingSourceLocation(), PlayerDirection);
-			OnGrappleFired();
-		}
-		else
-		{
-			RetractGrapple();
+				bRetracted = false;
+				const FVector PlayerDirection = Player->GetBaseAimRotation().Vector();
+				RCO->ServerShootGrapple(this, GetShootingSourceLocation(), PlayerDirection);
+				OnGrappleFired();
+			}
+			else
+			{
+				RetractGrapple();
+			}
 		}
 	}
 }
