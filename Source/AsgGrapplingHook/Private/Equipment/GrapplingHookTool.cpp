@@ -1,13 +1,13 @@
-﻿#include "GrapplingHookTool.h"
+﻿#include "Equipment/GrapplingHookTool.h"
 
 #include "CableComponent.h"
 #include "EnhancedInputSubsystems.h"
-#include "FGEnhancedInputComponent.h"
-#include "FGInputMappingContext.h"
+#include "Input/FGEnhancedInputComponent.h"
+#include "Input/FGInputMappingContext.h"
 #include "FGPlayerController.h"
 #include "FGSchematicManager.h"
-#include "SessionSettingsManager.h"
-#include "UnrealNetwork.h"
+#include "SessionSettings/SessionSettingsManager.h"
+#include "Net/UnrealNetwork.h"
 #include "Components/SphereComponent.h"
 #include "Kismet/KismetSystemLibrary.h"
 
@@ -143,7 +143,7 @@ float FGrapplingHookUpgradesChain::GetActiveValue(UWorld* Context) const
 	{
 		return BaseValue;
 	}
-	for (const TTuple<TSubclassOf<UFGSchematic>, float> Upgrade : Upgrades)
+	for (const TTuple<TSubclassOf<UFGSchematic>, float>& Upgrade : Upgrades)
 	{
 		if (SchematicManager->IsSchematicPurchased(Upgrade.Key))
 		{
@@ -557,7 +557,7 @@ void AGrapplingHookTool::SetInputContextRegistered(AFGPlayerController* Controll
 	{
 		return;
 	}
-	Controller->SetMappingContextBound(GrappleInputContext, bRegistered);
+	Controller->SetMappingContextBoundWithHandle(GrappleInputContextHandle, GrappleInputContext, bRegistered);
 }
 
 void AGrapplingHookTool::OnRep_GrappleProjectile()

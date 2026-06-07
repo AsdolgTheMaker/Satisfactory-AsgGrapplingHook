@@ -16,12 +16,12 @@ public:
 	
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	UCableComponent* CableComponent;
+	TObjectPtr<UCableComponent> CableComponent;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	UMaterialInterface* CableMaterial;
+	TObjectPtr<UMaterialInterface> CableMaterial;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	UMaterialInterface* CableMaterial1P;
+	TObjectPtr<UMaterialInterface> CableMaterial1P;
 	
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FFGOnProjectileImpact, const FHitResult&, HitResult);
 	FFGOnProjectileImpact OnProjectileImpactEvent;

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.1.7",
+	"VersionName": "1.2.0",
 	"FriendlyName": "Grappling Hook",
 	"Description": "Adds grappling hook tool that provides flexible vertical traversal.",
 	"Category": "Modding",
@@ -14,6 +14,7 @@
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,
+	"BuiltInInitialFeatureState": "Active",
 	"Modules": [
 		{
 			"Name": "AsgGrapplingHook",
@@ -25,9 +26,9 @@
 		{
 			"Name": "SML",
 			"Enabled": true,
-			"SemVersion": "^3.11.0"
+			"SemVersion": "^3.12.0"
 		}
 	],
-	"SemVersion": "1.1.7",
-	"GameVersion": ">=410840"
+	"SemVersion": "1.2.0",
+	"GameVersion": ">=491125"
 }

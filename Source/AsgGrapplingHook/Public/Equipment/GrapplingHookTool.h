@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "FGRemoteCallObject.h"
 #include "Equipment/FGWeapon.h"
+#include "Input/FGBoundMappingContextHandle.h"
 #include "Projectiles/GrappleProjectile.h"
 #include "GrapplingHookTool.generated.h"
 
@@ -141,16 +142,16 @@ protected:
 protected:	
 	// Input context to register when grapple tool is equipped (will unregister when unequipped).
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category=Input)
-	UFGInputMappingContext* GrappleInputContext = nullptr; 
+	TObjectPtr<UFGInputMappingContext> GrappleInputContext = nullptr; 
 	// Action to shoot/return grapple projectile.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category=Input)
-	UInputAction* PrimaryFireAction = nullptr;
+	TObjectPtr<UInputAction> PrimaryFireAction = nullptr;
 	// Action to shrink cable's desired length.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category=Input)
-	UInputAction* RetractCableAction = nullptr;
+	TObjectPtr<UInputAction> RetractCableAction = nullptr;
 	// Action to prolong cable's desired length.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category=Input)
-	UInputAction* ExtendCableAction = nullptr;
+	TObjectPtr<UInputAction> ExtendCableAction = nullptr;
 
 	// Widget that will appear on screen when player is aiming at reachable surface.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple")
@@ -193,7 +194,7 @@ private:
 private:
 	// Grapple projectile that was shot from this tool.
 	UPROPERTY(Transient, ReplicatedUsing=OnRep_GrappleProjectile)
-	AGrappleProjectile* GrappleProjectile = nullptr;
+	TObjectPtr<AGrappleProjectile> GrappleProjectile = nullptr;
 
 	// Desired length is length at which tension force will be applied to player.
 	// When it is larger than actual length, tension is not applied.
@@ -211,9 +212,13 @@ private:
 	// Whether input actions were bound to their respective delegates
 	bool bInputsBound = false;
 
+	// Handle tracking the grapple input mapping context binding on the player controller
+	// (5.6 Enhanced Input replaced AFGPlayerController::SetMappingContextBound with a handle-based API)
+	FBoundMappingContextHandle GrappleInputContextHandle;
+
 	// Local flag indicating whether projectile should be located inside the tool or not.
 	bool bRetracted = true;
 
 	UPROPERTY(Transient)
-	UUserWidget* CrosshairHighlightWidget;
+	TObjectPtr<UUserWidget> CrosshairHighlightWidget;
 };
