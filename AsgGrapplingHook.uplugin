@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.2.0",
+	"VersionName": "1.2.1",
 	"FriendlyName": "Grappling Hook",
 	"Description": "Adds grappling hook tool that provides flexible vertical traversal.",
 	"Category": "Modding",
@@ -29,6 +29,6 @@
 			"SemVersion": "^3.12.0"
 		}
 	],
-	"SemVersion": "1.2.0",
+	"SemVersion": "1.2.1",
 	"GameVersion": ">=491125"
 }

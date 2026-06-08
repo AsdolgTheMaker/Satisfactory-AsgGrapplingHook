@@ -28,6 +28,10 @@ public:
 	UFUNCTION(Server, Reliable)
 	void ServerProcessDesiredCableLengthQueries(AGrapplingHookTool* Tool, float QueriedChange, float DeltaSeconds);
 
+	// Applies client's config to server-driven physics
+	UFUNCTION(Server, Reliable)
+	void ServerSetGrappleConfig(AGrapplingHookTool* Tool, float ReelSpeedRatio, float MaxCableLengthRatio, float EjectionSpeedRatio);
+
 private:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -43,14 +47,22 @@ struct FGrapplingHookUpgradesChain
 	GENERATED_BODY()
 
 public:
+	// User's preferred value
 	float GetActiveValue(const UObject* Context) const;
 	float GetActiveValue(UWorld* Context) const;
-	
+
+	// Researched max value
+	float GetMaximumValue(const UObject* Context) const;
+	float GetMaximumValue(UWorld* Context) const;
+
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float BaseValue = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TMap<TSubclassOf<UFGSchematic>, float> Upgrades;
+
+	UPROPERTY(BlueprintReadOnly)
+	float ConfigRatio = 1.f;
 };
 
 UCLASS(Abstract)
@@ -79,6 +91,32 @@ public:
 	//~ End AFGEquipment interface
 
 	void RetractGrapple();
+
+	UFUNCTION(BlueprintCallable, Category="Grapple|Config")
+	void SetGrappleConfig(float NewReelSpeedRatio, float NewMaxCableLengthRatio, float NewEjectionSpeedRatio);
+
+	UFUNCTION(BlueprintCallable, Category="Grapple|Config")
+	void RefreshGrappleConfig();
+
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetReelSpeedRatio() const { return UpgradesSpeed.ConfigRatio; }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetMaxCableLengthRatio() const { return UpgradesLength.ConfigRatio; }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetEjectionSpeedRatio() const { return UpgradesPower.ConfigRatio; }
+
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetReelSpeedValue() const { return UpgradesSpeed.GetActiveValue(this); }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetMaxCableLengthValue() const { return UpgradesLength.GetActiveValue(this); }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetEjectionSpeedValue() const { return UpgradesPower.GetActiveValue(this); }
+
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetReelSpeedMaximum() const { return UpgradesSpeed.GetMaximumValue(this); }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetMaxCableLengthMaximum() const { return UpgradesLength.GetMaximumValue(this); }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetEjectionSpeedMaximum() const { return UpgradesPower.GetMaximumValue(this); }
+
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetReelSpeedBase() const { return UpgradesSpeed.BaseValue; }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetMaxCableLengthBase() const { return UpgradesLength.BaseValue; }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") float GetEjectionSpeedBase() const { return UpgradesPower.BaseValue; }
+
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") bool IsReelSpeedTunable() const { return UpgradesSpeed.GetMaximumValue(this) > UpgradesSpeed.BaseValue + KINDA_SMALL_NUMBER; }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") bool IsMaxCableLengthTunable() const { return UpgradesLength.GetMaximumValue(this) > UpgradesLength.BaseValue + KINDA_SMALL_NUMBER; }
+	UFUNCTION(BlueprintPure, Category="Grapple|Config") bool IsEjectionSpeedTunable() const { return UpgradesPower.GetMaximumValue(this) > UpgradesPower.BaseValue + KINDA_SMALL_NUMBER; }
 
 	UFUNCTION(Server, Unreliable)
 	void ServerTickGrapple(float DeltaSeconds);
@@ -127,6 +165,7 @@ protected:
 	void OnDesiredCableLengthChanged(float NewRatio);
 
 	float GetCableLengthControlStep() const;
+	// Tuned/active max cable length (respects the player's config), not the researched ceiling.
 	float GetMaxCableLength() const;
 	float GetTearingDistance() const;
 	float GetInitialHookVelocity() const;
@@ -221,4 +260,12 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> CrosshairHighlightWidget;
+
+	void ApplyConfigRatios();
+	void PushConfigToServer();
+	
+	// Snaps a stat back to max when its researched ceiling grew since last set. Returns true if anything changed.
+	bool ReconcileResearchSnap();
+
+	float ConfigSnapCheckAccumulator = 0.f;
 };

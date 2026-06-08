@@ -1,12 +1,12 @@
 ﻿#include "Equipment/GrapplingHookTool.h"
 
+#include "GrappleLocalConfig.h"
 #include "CableComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Input/FGEnhancedInputComponent.h"
 #include "Input/FGInputMappingContext.h"
 #include "FGPlayerController.h"
 #include "FGSchematicManager.h"
-#include "SessionSettings/SessionSettingsManager.h"
 #include "Net/UnrealNetwork.h"
 #include "Components/SphereComponent.h"
 #include "Kismet/KismetSystemLibrary.h"
@@ -123,6 +123,17 @@ void UGrapplingHookRCO::ServerProcessDesiredCableLengthQueries_Implementation(AG
 	}
 }
 
+void UGrapplingHookRCO::ServerSetGrappleConfig_Implementation(AGrapplingHookTool* Tool, float ReelSpeedRatio, float MaxCableLengthRatio, float EjectionSpeedRatio)
+{
+	if (!Tool)
+	{
+		return;
+	}
+	Tool->UpgradesSpeed.ConfigRatio = FMath::Clamp(ReelSpeedRatio, 0.f, 1.f);
+	Tool->UpgradesLength.ConfigRatio = FMath::Clamp(MaxCableLengthRatio, 0.f, 1.f);
+	Tool->UpgradesPower.ConfigRatio = FMath::Clamp(EjectionSpeedRatio, 0.f, 1.f);
+}
+
 void UGrapplingHookRCO::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -136,6 +147,17 @@ float FGrapplingHookUpgradesChain::GetActiveValue(const UObject* Context) const
 }
 
 float FGrapplingHookUpgradesChain::GetActiveValue(UWorld* Context) const
+{
+	const float Maximum = GetMaximumValue(Context);
+	return FMath::Lerp(BaseValue, Maximum, FMath::Clamp(ConfigRatio, 0.f, 1.f));
+}
+
+float FGrapplingHookUpgradesChain::GetMaximumValue(const UObject* Context) const
+{
+	return GetMaximumValue(Context->GetWorld());
+}
+
+float FGrapplingHookUpgradesChain::GetMaximumValue(UWorld* Context) const
 {
 	float ActiveValue = BaseValue;
 	const AFGSchematicManager* SchematicManager = AFGSchematicManager::Get(Context);
@@ -244,19 +266,15 @@ void AGrapplingHookTool::SetCableLength_Implementation(const float NewLength)
 void AGrapplingHookTool::LoadFromItemState_Implementation(const FFGDynamicStruct& itemState)
 {
 	Super::LoadFromItemState_Implementation(itemState);
-	// TODO: maybe save/load projectile and its cable states?	
 }
 
 FFGDynamicStruct AGrapplingHookTool::SaveToItemState_Implementation() const
-{ 
-	// TODO: maybe save/load projectile and its cable states?
+{
 	return Super::SaveToItemState_Implementation();
-
 }
 
 bool AGrapplingHookTool::ShouldSave_Implementation() const
 {
-	// TODO: maybe save/load projectile and its cable states?
 	return false;
 }
 
@@ -270,6 +288,8 @@ void AGrapplingHookTool::Equip(AFGCharacterPlayer* Character)
 	// Create crosshair highlight widget for local tool's owner
 	if (Controller && Controller->IsLocalController())
 	{
+		RefreshGrappleConfig();
+
 		CrosshairHighlightWidget = CreateWidget(Controller, CrosshairHighlightWidgetClass);
 		CrosshairHighlightWidget->AddToPlayerScreen(10);
 		CrosshairHighlightWidget->SetVisibility(ESlateVisibility::Hidden);
@@ -335,6 +355,17 @@ void AGrapplingHookTool::RetractGrapple()
 
 void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 {
+	// Periodic snap-to-max check while the tool is held.
+	ConfigSnapCheckAccumulator += DeltaSeconds;
+	if (ConfigSnapCheckAccumulator >= 5.0f)
+	{
+		ConfigSnapCheckAccumulator = 0.f;
+		if (ReconcileResearchSnap())
+		{
+			PushConfigToServer();
+		}
+	}
+
 	if (bGrappleAttached)
 	{
 		// Apply length control queries to desired cable length 
@@ -543,6 +574,84 @@ float AGrapplingHookTool::GetTearingDistance() const
 float AGrapplingHookTool::GetInitialHookVelocity() const
 {
 	return UpgradesPower.GetActiveValue(this);
+}
+
+void AGrapplingHookTool::SetGrappleConfig(float NewReelSpeedRatio, float NewMaxCableLengthRatio, float NewEjectionSpeedRatio)
+{
+	UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+
+	Config->ReelSpeedRatio = FMath::Clamp(NewReelSpeedRatio, 0.f, 1.f);
+	Config->MaxCableLengthRatio = FMath::Clamp(NewMaxCableLengthRatio, 0.f, 1.f);
+	Config->EjectionSpeedRatio = FMath::Clamp(NewEjectionSpeedRatio, 0.f, 1.f);
+
+	// Record the max each ratio was set against (drives the snap-on-research).
+	Config->ReelSpeedMaxSeen = UpgradesSpeed.GetMaximumValue(this);
+	Config->MaxCableLengthMaxSeen = UpgradesLength.GetMaximumValue(this);
+	Config->EjectionSpeedMaxSeen = UpgradesPower.GetMaximumValue(this);
+
+	Config->SaveConfig();
+	ApplyConfigRatios();
+	PushConfigToServer();
+}
+
+void AGrapplingHookTool::RefreshGrappleConfig()
+{
+	ReconcileResearchSnap();
+	ApplyConfigRatios();
+	PushConfigToServer();
+}
+
+void AGrapplingHookTool::PushConfigToServer()
+{
+	if (HasAuthority())
+	{
+		return;
+	}
+	if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+	{
+		if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+		{
+			RCO->ServerSetGrappleConfig(this, UpgradesSpeed.ConfigRatio, UpgradesLength.ConfigRatio, UpgradesPower.ConfigRatio);
+		}
+	}
+}
+
+bool AGrapplingHookTool::ReconcileResearchSnap()
+{
+	UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+	bool bChanged = false;
+
+	auto Snap = [this, &bChanged](const FGrapplingHookUpgradesChain& Chain, float& Ratio, float& MaxSeen)
+	{
+		const float CurrentMax = Chain.GetMaximumValue(this);
+		if (CurrentMax > MaxSeen + KINDA_SMALL_NUMBER)
+		{
+			// Research just raised this stat's ceiling - give the player the full new value to give a feel of the new upgrade.
+			Ratio = 1.f;
+			MaxSeen = CurrentMax;
+			bChanged = true;
+		}
+	};
+
+	Snap(UpgradesSpeed, Config->ReelSpeedRatio, Config->ReelSpeedMaxSeen);
+	Snap(UpgradesLength, Config->MaxCableLengthRatio, Config->MaxCableLengthMaxSeen);
+	Snap(UpgradesPower, Config->EjectionSpeedRatio, Config->EjectionSpeedMaxSeen);
+
+	if (bChanged)
+	{
+		Config->SaveConfig();
+		ApplyConfigRatios();
+	}
+
+	return bChanged;
+}
+
+void AGrapplingHookTool::ApplyConfigRatios()
+{
+	const UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+	UpgradesSpeed.ConfigRatio = FMath::Clamp(Config->ReelSpeedRatio, 0.f, 1.f);
+	UpgradesLength.ConfigRatio = FMath::Clamp(Config->MaxCableLengthRatio, 0.f, 1.f);
+	UpgradesPower.ConfigRatio = FMath::Clamp(Config->EjectionSpeedRatio, 0.f, 1.f);
 }
 
 USceneComponent* AGrapplingHookTool::GetCableAttachComponent_Implementation() const
