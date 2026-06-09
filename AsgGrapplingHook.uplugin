@@ -22,6 +22,13 @@
 			"LoadingPhase": "Default"
 		}
 	],
+	"LocalizationTargets": [
+		{
+			"Name": "AsgGrapplingHook",
+			"LoadingPolicy": "Always",
+			"ConfigGenerationPolicy": "Never"
+		}
+	],
 	"Plugins": [
 		{
 			"Name": "SML",
