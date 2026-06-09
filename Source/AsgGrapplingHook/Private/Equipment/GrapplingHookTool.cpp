@@ -1,6 +1,8 @@
 ﻿#include "Equipment/GrapplingHookTool.h"
 
 #include "GrappleLocalConfig.h"
+#include "UI/GrappleControlsHintWidget.h"
+#include "Misc/DateTime.h"
 #include "CableComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Input/FGEnhancedInputComponent.h"
@@ -289,10 +291,21 @@ void AGrapplingHookTool::Equip(AFGCharacterPlayer* Character)
 	if (Controller && Controller->IsLocalController())
 	{
 		RefreshGrappleConfig();
+		ReconcileControlsHintMemory();
 
 		CrosshairHighlightWidget = CreateWidget(Controller, CrosshairHighlightWidgetClass);
 		CrosshairHighlightWidget->AddToPlayerScreen(10);
 		CrosshairHighlightWidget->SetVisibility(ESlateVisibility::Hidden);
+
+		if (ControlsHintWidgetClass)
+		{
+			ControlsHintWidget = CreateWidget<UGrappleControlsHintWidget>(Controller, ControlsHintWidgetClass);
+			if (ControlsHintWidget)
+			{
+				ControlsHintWidget->AddToPlayerScreen(9);
+				ControlsHintWidget->SetVisibility(ESlateVisibility::Collapsed);
+			}
+		}
 	}
 }
 
@@ -303,7 +316,14 @@ void AGrapplingHookTool::UnEquip()
 		CrosshairHighlightWidget->RemoveFromParent();
 		CrosshairHighlightWidget = nullptr;
 	}
-	
+	if (ControlsHintWidget)
+	{
+		ControlsHintWidget->RemoveFromParent();
+		ControlsHintWidget = nullptr;
+	}
+	bWasAttachedForHint = false;
+	bControlsHintVisible = false;
+
 	if (const AFGCharacterPlayer* Character = GetInstigatorCharacter())
 	{
 		if (AFGPlayerController* Controller = Character->GetFGPlayerController())
@@ -366,9 +386,57 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 		}
 	}
 
+	if (bReelInputThisFrame)
+	{
+		ReelHoldSeconds += DeltaSeconds;
+		if (!bReelHoldCounted && ReelHoldSeconds > 1.0f)
+		{
+			bReelHoldCounted = true;
+			RegisterReelSuccess();
+		}
+	}
+	else
+	{
+		ReelHoldSeconds = 0.f;
+		bReelHoldCounted = false;
+	}
+	bReelInputThisFrame = false;
+
+	if (bExtendInputThisFrame)
+	{
+		ExtendHoldSeconds += DeltaSeconds;
+		if (!bExtendHoldCounted && ExtendHoldSeconds > 1.0f)
+		{
+			bExtendHoldCounted = true;
+			RegisterReelOutSuccess();
+		}
+	}
+	else
+	{
+		ExtendHoldSeconds = 0.f;
+		bExtendHoldCounted = false;
+	}
+	bExtendInputThisFrame = false;
+
+	if (bGrappleAttached && !bWasAttachedForHint)
+	{
+		if (ControlsHintWidget && ShouldShowControlsHint())
+		{
+			bControlsHintVisible = true;
+			ControlsHintWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+			ControlsHintWidget->PlayShow();
+		}
+	}
+	else if (!bGrappleAttached && bWasAttachedForHint && bControlsHintVisible && ControlsHintWidget)
+	{
+		bControlsHintVisible = false;
+		ControlsHintWidget->PlayHide();
+	}
+	bWasAttachedForHint = bGrappleAttached;
+
 	if (bGrappleAttached)
 	{
-		// Apply length control queries to desired cable length 
+		// Apply length control queries to desired cable length
 		if (!FMath::IsNearlyZero(DesiredCableLengthControlQuery))
 		{
 			if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
@@ -451,6 +519,7 @@ void AGrapplingHookTool::HandleInput_RetractCable()
 		return;
 	}
 
+	bReelInputThisFrame = true;
 	DesiredCableLengthControlQuery -= GetCableLengthControlStep();
 }
 
@@ -461,6 +530,7 @@ void AGrapplingHookTool::HandleInput_ExtendCable()
 		return;
 	}
 
+	bExtendInputThisFrame = true;
 	DesiredCableLengthControlQuery += GetCableLengthControlStep();
 }
 
@@ -589,7 +659,7 @@ void AGrapplingHookTool::SetGrappleConfig(float NewReelSpeedRatio, float NewMaxC
 	Config->MaxCableLengthMaxSeen = UpgradesLength.GetMaximumValue(this);
 	Config->EjectionSpeedMaxSeen = UpgradesPower.GetMaximumValue(this);
 
-	Config->SaveConfig();
+	Config->Persist();
 	ApplyConfigRatios();
 	PushConfigToServer();
 }
@@ -639,7 +709,7 @@ bool AGrapplingHookTool::ReconcileResearchSnap()
 
 	if (bChanged)
 	{
-		Config->SaveConfig();
+		Config->Persist();
 		ApplyConfigRatios();
 	}
 
@@ -652,6 +722,58 @@ void AGrapplingHookTool::ApplyConfigRatios()
 	UpgradesSpeed.ConfigRatio = FMath::Clamp(Config->ReelSpeedRatio, 0.f, 1.f);
 	UpgradesLength.ConfigRatio = FMath::Clamp(Config->MaxCableLengthRatio, 0.f, 1.f);
 	UpgradesPower.ConfigRatio = FMath::Clamp(Config->EjectionSpeedRatio, 0.f, 1.f);
+}
+
+bool AGrapplingHookTool::ShouldShowControlsHint() const
+{
+	const UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+	return Config->ControlsHintReelSuccesses < UGrappleLocalConfig::ControlsHintReelInTarget
+		|| Config->ControlsHintReelOutSuccesses < UGrappleLocalConfig::ControlsHintReelOutTarget;
+}
+
+void AGrapplingHookTool::RegisterReelSuccess()
+{
+	UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+	if (Config->ControlsHintReelSuccesses < UGrappleLocalConfig::ControlsHintReelInTarget)
+	{
+		Config->ControlsHintReelSuccesses++;
+		Config->Persist();
+		if (ControlsHintWidget)
+		{
+			ControlsHintWidget->NotifyTutorialProgress();
+		}
+	}
+}
+
+void AGrapplingHookTool::RegisterReelOutSuccess()
+{
+	UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+	if (Config->ControlsHintReelOutSuccesses < UGrappleLocalConfig::ControlsHintReelOutTarget)
+	{
+		Config->ControlsHintReelOutSuccesses++;
+		Config->Persist();
+		if (ControlsHintWidget)
+		{
+			ControlsHintWidget->NotifyTutorialProgress();
+		}
+	}
+}
+
+void AGrapplingHookTool::ReconcileControlsHintMemory()
+{
+	UGrappleLocalConfig* Config = UGrappleLocalConfig::Get();
+	const FDateTime Now = FDateTime::UtcNow();
+	if (Config->ControlsHintLastPlayUtcTicks > 0)
+	{
+		const FDateTime LastPlay = FDateTime(Config->ControlsHintLastPlayUtcTicks);
+		if (Now - LastPlay > FTimespan::FromDays(30.0))
+		{
+			Config->ControlsHintReelSuccesses = 0;
+			Config->ControlsHintReelOutSuccesses = 0;
+		}
+	}
+	Config->ControlsHintLastPlayUtcTicks = Now.GetTicks();
+	Config->Persist();
 }
 
 USceneComponent* AGrapplingHookTool::GetCableAttachComponent_Implementation() const

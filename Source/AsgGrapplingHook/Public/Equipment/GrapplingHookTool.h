@@ -13,6 +13,7 @@ class UFGInputMappingContext;
 class AFGPlayerController;
 class UFGEnhancedInputComponent;
 class AFGProjectile;
+class UGrappleControlsHintWidget;
 
 UCLASS()
 class ASGGRAPPLINGHOOK_API UGrapplingHookRCO : public UFGRemoteCallObject
@@ -118,6 +119,8 @@ public:
 	UFUNCTION(BlueprintPure, Category="Grapple|Config") bool IsMaxCableLengthTunable() const { return UpgradesLength.GetMaximumValue(this) > UpgradesLength.BaseValue + KINDA_SMALL_NUMBER; }
 	UFUNCTION(BlueprintPure, Category="Grapple|Config") bool IsEjectionSpeedTunable() const { return UpgradesPower.GetMaximumValue(this) > UpgradesPower.BaseValue + KINDA_SMALL_NUMBER; }
 
+	UFUNCTION(BlueprintPure, Category="Grapple|Hint") bool ShouldShowControlsHint() const;
+
 	UFUNCTION(Server, Unreliable)
 	void ServerTickGrapple(float DeltaSeconds);
 	UFUNCTION()
@@ -195,6 +198,9 @@ protected:
 	// Widget that will appear on screen when player is aiming at reachable surface.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple")
 	TSubclassOf<UUserWidget> CrosshairHighlightWidgetClass;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple")
+	TSubclassOf<UGrappleControlsHintWidget> ControlsHintWidgetClass;
 	
 	// Projectile that will be shot from the tool.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Grapple|Projectile")
@@ -261,6 +267,9 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> CrosshairHighlightWidget;
 
+	UPROPERTY(Transient)
+	TObjectPtr<UGrappleControlsHintWidget> ControlsHintWidget;
+
 	void ApplyConfigRatios();
 	void PushConfigToServer();
 	
@@ -268,4 +277,17 @@ private:
 	bool ReconcileResearchSnap();
 
 	float ConfigSnapCheckAccumulator = 0.f;
+
+	void ReconcileControlsHintMemory();
+	void RegisterReelSuccess();
+	void RegisterReelOutSuccess();
+
+	bool bWasAttachedForHint = false;
+	bool bControlsHintVisible = false;
+	bool bReelInputThisFrame = false;
+	float ReelHoldSeconds = 0.f;
+	bool bReelHoldCounted = false;
+	bool bExtendInputThisFrame = false;
+	float ExtendHoldSeconds = 0.f;
+	bool bExtendHoldCounted = false;
 };
