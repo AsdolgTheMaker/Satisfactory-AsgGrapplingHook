@@ -389,7 +389,7 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 	if (bReelInputThisFrame)
 	{
 		ReelHoldSeconds += DeltaSeconds;
-		if (!bReelHoldCounted && ReelHoldSeconds > 1.0f)
+		if (!bReelHoldCounted && ReelHoldSeconds > 0.7f)
 		{
 			bReelHoldCounted = true;
 			RegisterReelSuccess();
@@ -405,7 +405,7 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 	if (bExtendInputThisFrame)
 	{
 		ExtendHoldSeconds += DeltaSeconds;
-		if (!bExtendHoldCounted && ExtendHoldSeconds > 1.0f)
+		if (!bExtendHoldCounted && ExtendHoldSeconds > 0.7f)
 		{
 			bExtendHoldCounted = true;
 			RegisterReelOutSuccess();
