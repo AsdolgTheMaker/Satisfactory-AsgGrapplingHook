@@ -82,7 +82,7 @@ void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* To
 	}
 }
 
-void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* Tool)
+void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* Tool, const FVector& ReleaseVelocity)
 {
 	if (!Tool)
 	{
@@ -93,6 +93,8 @@ void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* 
 		Tool->GrappleProjectile->Destroy();
 		Tool->GrappleProjectile = nullptr;
 	}
+	Tool->ApplyReleaseVelocity(ReleaseVelocity);
+	Tool->SetClientAuthoritativeMovement(false);
 	Tool->bGrappleAttached = false;
 	Tool->DesiredCableLength = 0;
 	Tool->OnRep_DesiredCableLength();
@@ -197,6 +199,15 @@ void AGrapplingHookTool::Tick(const float DeltaSeconds)
 	{
 		ServerTickGrapple(DeltaSeconds);
 	}
+
+	if (!HasAuthority() && bGrappleAttached && GrappleProjectile && !GrappleForcePointLocation.IsNearlyZero())
+	{
+		if (USceneComponent* ProjectileRoot = GrappleProjectile->GetRootComponent(); ProjectileRoot && ProjectileRoot->GetAttachParent())
+		{
+			ProjectileRoot->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+		}
+		GrappleProjectile->SetActorLocationAndRotation(GrappleForcePointLocation, GrappleForcePointRotation);
+	}
 }
 
 void AGrapplingHookTool::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -205,6 +216,8 @@ void AGrapplingHookTool::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	DOREPLIFETIME(AGrapplingHookTool, GrappleProjectile);
 	DOREPLIFETIME(AGrapplingHookTool, DesiredCableLength);
 	DOREPLIFETIME(AGrapplingHookTool, bGrappleAttached);
+	DOREPLIFETIME(AGrapplingHookTool, GrappleForcePointLocation);
+	DOREPLIFETIME(AGrapplingHookTool, GrappleForcePointRotation);
 }
 
 void AGrapplingHookTool::ServerTickGrapple_Implementation(const float DeltaSeconds)
@@ -238,11 +251,15 @@ void AGrapplingHookTool::ServerTickGrapple_Implementation(const float DeltaSecon
 			RetractGrapple();
 			return;
 		}
-		
-		// Run physics simulation on server (has authority over client simulations, if any are running)
-		TickTensionForce(DeltaSeconds, true);
 
-		// Keep visual cable length representing desired length (resulting value is smaller so cable does not appear loose when it should be tense)  
+		SetClientAuthoritativeMovement(true);
+
+		if (!IsLocalInstigator())
+		{
+			TickTensionForce(DeltaSeconds);
+		}
+
+		// Keep visual cable length representing desired length (resulting value is smaller so cable does not appear loose when it should be tense)
 		SetCableLength(FMath::Max(50, DesiredCableLength - 250));
 	}
 }
@@ -362,7 +379,15 @@ void AGrapplingHookTool::RetractGrapple()
 	{
 		if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
 		{
-			RCO->ServerRetractGrapple(this);
+			FVector ReleaseVelocity = FVector::ZeroVector;
+			if (const AFGCharacterPlayer* Player = GetInstigatorCharacter())
+			{
+				if (const UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent())
+				{
+					ReleaseVelocity = Movement->Velocity;
+				}
+			}
+			RCO->ServerRetractGrapple(this, ReleaseVelocity);
 			if (!bRetracted)
 			{
 				bRetracted = true;
@@ -436,6 +461,8 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 
 	if (bGrappleAttached)
 	{
+		TickTensionForce(DeltaSeconds);
+
 		// Apply length control queries to desired cable length
 		if (!FMath::IsNearlyZero(DesiredCableLengthControlQuery))
 		{
@@ -474,13 +501,33 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 	}		
 }
 
-void AGrapplingHookTool::SetInstigatorVelocity_Implementation(const FVector& NewVelocity)
+void AGrapplingHookTool::SetClientAuthoritativeMovement(const bool bEnable)
 {
+	if (!HasAuthority() || IsLocalInstigator())
+	{
+		return;
+	}
 	if (const AFGCharacterPlayer* Player = GetInstigatorCharacter())
 	{
 		if (UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent())
 		{
-			Movement->SetGeneralVelocity(NewVelocity);
+			Movement->bIgnoreClientMovementErrorChecksAndCorrection = bEnable;
+			Movement->bServerAcceptClientAuthoritativePosition = bEnable;
+		}
+	}
+}
+
+void AGrapplingHookTool::ApplyReleaseVelocity(const FVector& ReleaseVelocity)
+{
+	if (!HasAuthority() || IsLocalInstigator())
+	{
+		return;
+	}
+	if (const AFGCharacterPlayer* Player = GetInstigatorCharacter())
+	{
+		if (UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent())
+		{
+			Movement->Velocity = ReleaseVelocity;
 		}
 	}
 }
@@ -534,57 +581,58 @@ void AGrapplingHookTool::HandleInput_ExtendCable()
 	DesiredCableLengthControlQuery += GetCableLengthControlStep();
 }
 
-void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds, const bool bPropagateOverNetwork)
+void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds)
 {
 	const float ActualCurrentCableLength = GetDistanceToGrappleForcePoint();
+
+	const AFGCharacterPlayer* ToolOwner = GetInstigatorCharacter();
+	if (!ToolOwner)
+	{
+		return;
+	}
+	UFGCharacterMovementComponent* Movement = ToolOwner->GetFGMovementComponent();
+	if (!Movement)
+	{
+		return;
+	}
+
+	const FVector TensionForceDirection = (GetGrappleForcePoint() - ToolOwner->GetActorLocation()).GetSafeNormal();
+
 	if (ActualCurrentCableLength >= DesiredCableLength)
 	{
-		if (const AFGCharacterPlayer* ToolOwner = GetInstigatorCharacter())
+		// Tension force is player's inverse velocity projected onto grapple direction vector
+		const FVector TensionForce = (-Movement->GetVelocity()).ProjectOnTo(TensionForceDirection);
+
+		FVector DesiredVelocity = Movement->Velocity;
+
+		// Apply tension force, if its direction is facing grapple point
+		if (FMath::IsNearlyEqual(FVector::DotProduct(TensionForceDirection, TensionForce.GetSafeNormal()), 1.0f, 1e-06))
 		{
-			if (UFGCharacterMovementComponent* Movement = ToolOwner->GetFGMovementComponent())
+			// In air, we make the rope feel stretchable by applying the force over time instead of instantly
+			// On the ground however it's a different story, because player has friction, tfw much more resistance to external forces - we apply full force immediately.
+			const float TimeMultiplier = Movement->MovementMode == MOVE_Walking ? 1 : DeltaSeconds*3;
+			DesiredVelocity += TensionForce * TimeMultiplier;
+		}
+
+		// If cable is longer than desired length allows, tension should pull player towards grapple point
+		if (ActualCurrentCableLength > DesiredCableLength)
+		{
+			const float ExcessDistance = ActualCurrentCableLength - DesiredCableLength;
+			DesiredVelocity += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
+		}
+
+		// Apply velocity to movement comp
+		Movement->Velocity = DesiredVelocity;
+
+		// Help player to automatically take off the ground if floor normal to tension force angle is less than ~43 degrees
+		if (Movement->MovementMode == MOVE_Walking)
+		{
+			const float Dot = FMath::Clamp(FVector::DotProduct(Movement->CurrentFloor.HitResult.Normal, TensionForceDirection), -1.0f, 1.0f);
+			const float FloorNormalToTensionDirAngle = FMath::Acos(Dot);
+			if (FloorNormalToTensionDirAngle < (PI/4 - PI/64))
 			{
-				// Tension force is player's inverse velocity projected onto grapple direction vector
-				const FVector TensionForceDirection = (GetGrappleForcePoint() - ToolOwner->GetActorLocation()).GetSafeNormal();
-				const FVector TensionForce = (-Movement->GetVelocity()).ProjectOnTo(TensionForceDirection);
-
-				FVector DesiredVelocity = Movement->Velocity;
-
-				// Apply tension force, if its direction is facing grapple point
-				if (FMath::IsNearlyEqual(FVector::DotProduct(TensionForceDirection, TensionForce.GetSafeNormal()), 1.0f, 1e-06))
-				{
-					// In air, we make the rope feel stretchable by applying the force over time instead of instantly
-					// On the ground however it's a different story, because player has friction, tfw much more resistance to external forces - we apply full force immediately.
-					const float TimeMultiplier = Movement->MovementMode == MOVE_Walking ? 1 : DeltaSeconds*3;
-					DesiredVelocity += TensionForce * TimeMultiplier;  
-				}
-
-				// If cable is longer than desired length allows, tension should pull player towards grapple point
-				if (ActualCurrentCableLength > DesiredCableLength)
-				{
-					const float ExcessDistance = ActualCurrentCableLength - DesiredCableLength;
-					DesiredVelocity += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
-				}
-
-				// Apply velocity to movement comp
-				Movement->Velocity = DesiredVelocity;
-
-				// Help player to automatically take off the ground if floor normal to tension force angle is less than ~43 degrees 
-				if (Movement->MovementMode == MOVE_Walking)
-				{
-					const float Dot = FMath::Clamp(FVector::DotProduct(Movement->CurrentFloor.HitResult.Normal, TensionForceDirection), -1.0f, 1.0f);
-					const float FloorNormalToTensionDirAngle = FMath::Acos(Dot); 
-					if (FloorNormalToTensionDirAngle < (PI/4 - PI/64))
-					{
-						Movement->MovementMode = MOVE_Falling;
-						Movement->CurrentFloor.Clear();
-					}
-				}
-
-				if (bPropagateOverNetwork)
-				{
-					// Manually propagate velocity changes over network to reduce movement lag on clients
-					SetInstigatorVelocity(Movement->Velocity);
-				}
+				Movement->MovementMode = MOVE_Falling;
+				Movement->CurrentFloor.Clear();
 			}
 		}
 	}
@@ -592,9 +640,12 @@ void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds, const bool b
 
 void AGrapplingHookTool::OnGrappleHitSurface(const FHitResult& HitResult)
 {
+	GrappleForcePointLocation = HitResult.Location;
+	GrappleForcePointRotation = GrappleProjectile ? GrappleProjectile->GetActorRotation() : FRotator::ZeroRotator;
 	bGrappleAttached = true;
 	DesiredCableLength = GetDistanceToGrappleForcePoint();
 	OnRep_GrappleAttached();
+	OnRep_GrappleForcePointLocation();
 	OnRep_DesiredCableLength();
 }
 
@@ -606,8 +657,8 @@ float AGrapplingHookTool::GetDistanceToGrappleForcePoint() const
 		return 0;
 	}
 
-	// TODO: Implement support for cable turns 
-	return FVector::Distance(GetShootingSourceLocation(), GetGrappleForcePoint());
+	// TODO: Implement support for cable turns
+	return FVector::Distance(ToolOwner->GetActorLocation(), GetGrappleForcePoint());
 }
 
 FVector AGrapplingHookTool::GetGrappleForcePoint() const
@@ -615,6 +666,11 @@ FVector AGrapplingHookTool::GetGrappleForcePoint() const
 	if (!GrappleProjectile)
 	{
 		return RootComponent->GetComponentLocation();
+	}
+
+	if (bGrappleAttached && !GrappleForcePointLocation.IsNearlyZero())
+	{
+		return GrappleForcePointLocation;
 	}
 
 	// TODO: Implement support for cable turns
@@ -828,4 +884,12 @@ void AGrapplingHookTool::OnRep_GrappleAttached()
 void AGrapplingHookTool::OnRep_DesiredCableLength()
 {
 	OnDesiredCableLengthChanged(DesiredCableLength / GetMaxCableLength());
+}
+
+void AGrapplingHookTool::OnRep_GrappleForcePointLocation()
+{
+	if (bGrappleAttached && GrappleProjectile && !GrappleForcePointLocation.IsNearlyZero())
+	{
+		GrappleProjectile->SetActorLocationAndRotation(GrappleForcePointLocation, GrappleForcePointRotation);
+	}
 }

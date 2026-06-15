@@ -24,7 +24,7 @@ public:
 	UFUNCTION(Server, Reliable)
 	void ServerShootGrapple(AGrapplingHookTool* Tool, const FVector& ShootingSourceLocation, const FVector& PlayerAimDirection);
 	UFUNCTION(Server, Reliable)
-	void ServerRetractGrapple(AGrapplingHookTool* Tool);
+	void ServerRetractGrapple(AGrapplingHookTool* Tool, const FVector& ReleaseVelocity);
 	
 	UFUNCTION(Server, Reliable)
 	void ServerProcessDesiredCableLengthQueries(AGrapplingHookTool* Tool, float QueriedChange, float DeltaSeconds);
@@ -128,10 +128,7 @@ public:
 	
 	UFUNCTION(NetMulticast, Unreliable)
 	void SetCableLength(float NewLength);
-	
-	UFUNCTION(NetMulticast, Unreliable)
-	void SetInstigatorVelocity(const FVector& NewVelocity);
-	
+
 	UFUNCTION()
 	void HandleInput_PrimaryFire();
 	UFUNCTION()
@@ -139,7 +136,7 @@ public:
 	UFUNCTION()
 	void HandleInput_ExtendCable();
 
-	void TickTensionForce(float DeltaSeconds, bool bPropagateOverNetwork);
+	void TickTensionForce(float DeltaSeconds);
 
 protected:
 	// Called when grapple projectile hits something (bound to respective event in AGrappleProjectile)
@@ -226,8 +223,12 @@ protected:
 	float CableGravityScaleAfterHit = 3;
 
 private:
-	// Turn grapple-specific inputs on/off 
+	// Turn grapple-specific inputs on/off
 	void SetInputContextRegistered(AFGPlayerController* Controller, const bool bRegistered);
+
+	void SetClientAuthoritativeMovement(bool bEnable);
+
+	void ApplyReleaseVelocity(const FVector& ReleaseVelocity);
 
 	UFUNCTION()
 	void OnRep_GrappleProjectile();
@@ -235,6 +236,8 @@ private:
 	void OnRep_GrappleAttached();
 	UFUNCTION()
 	void OnRep_DesiredCableLength();
+	UFUNCTION()
+	void OnRep_GrappleForcePointLocation();
 	
 private:
 	// Grapple projectile that was shot from this tool.
@@ -253,6 +256,12 @@ private:
 	// Whether grapple projectile is sticked to something.
 	UPROPERTY(Transient, ReplicatedUsing=OnRep_GrappleAttached)
 	bool bGrappleAttached = false;
+
+	UPROPERTY(Transient, ReplicatedUsing=OnRep_GrappleForcePointLocation)
+	FVector GrappleForcePointLocation = FVector::ZeroVector;
+
+	UPROPERTY(Transient, Replicated)
+	FRotator GrappleForcePointRotation = FRotator::ZeroRotator;
 
 	// Whether input actions were bound to their respective delegates
 	bool bInputsBound = false;
