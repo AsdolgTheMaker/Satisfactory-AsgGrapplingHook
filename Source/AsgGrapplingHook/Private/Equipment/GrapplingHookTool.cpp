@@ -13,14 +13,9 @@
 #include "Net/UnrealNetwork.h"
 #include "Components/SphereComponent.h"
 #include "Components/CapsuleComponent.h"
-#include "HAL/IConsoleManager.h"
-
-static TAutoConsoleVariable<float> CVarGrappleClientCompensation(
-	TEXT("asg.GrappleClientCompensation"),
-	1.5f,
-	TEXT("Tension scale on the owning client only (host/server use 1.0). The autonomous proxy retains only ~2/3 of an out-of-band velocity add, so its tension is pre-scaled to match the host. Constant across ping (measured 20-300ms). 1.0 disables it."),
-	ECVF_Default);
 #include "Kismet/KismetSystemLibrary.h"
+
+static constexpr float ClientTensionCompensation = 1.5f;
 
 #define BIND_ACTION(Controller, Action, TriggerEvent, FuncName) \
 	{ \
@@ -723,7 +718,7 @@ void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds)
 			TensionDelta += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
 		}
 
-		const float NetworkCompensation = HasAuthority() ? 1.f : CVarGrappleClientCompensation.GetValueOnGameThread();
+		const float NetworkCompensation = HasAuthority() ? 1.f : ClientTensionCompensation;
 		Movement->Velocity += TensionDelta * NetworkCompensation;
 
 		if (Movement->MovementMode == MOVE_Walking)
