@@ -8,9 +8,18 @@
 #include "Input/FGEnhancedInputComponent.h"
 #include "Input/FGInputMappingContext.h"
 #include "FGPlayerController.h"
+#include "FGHealthComponent.h"
 #include "FGSchematicManager.h"
 #include "Net/UnrealNetwork.h"
 #include "Components/SphereComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<float> CVarGrappleClientCompensation(
+	TEXT("asg.GrappleClientCompensation"),
+	1.5f,
+	TEXT("Tension scale on the owning client only (host/server use 1.0). The autonomous proxy retains only ~2/3 of an out-of-band velocity add, so its tension is pre-scaled to match the host. Constant across ping (measured 20-300ms). 1.0 disables it."),
+	ECVF_Default);
 #include "Kismet/KismetSystemLibrary.h"
 
 #define BIND_ACTION(Controller, Action, TriggerEvent, FuncName) \
@@ -20,110 +29,81 @@
 		Controller->BindToAction(Action, ETriggerEvent::TriggerEvent, Delegate); \
 	}
 
-FVector2f PaniniProjection(const FVector2f OM, float d, float s)
-{
-	const float PaniniDirectionXZInvLength = 1.0f / FMath::Sqrt(1.0f + OM.X * OM.X);
-	const float SinPhi = OM.X * PaniniDirectionXZInvLength;
-	const float TanTheta = OM.Y * PaniniDirectionXZInvLength;
-	const float CosPhi = FMath::Sqrt(1.0f - SinPhi * SinPhi);
-	const float S = (d + 1.0f) / (d + CosPhi);
-
-	return S * FVector2f(SinPhi, FMath::Lerp(TanTheta, TanTheta / CosPhi, s));
-}
-
-void UGrapplingHookRCO::ServerShootGrapple_Implementation(AGrapplingHookTool* Tool, const FVector& ShootingSourceLocation, const FVector& PlayerAimDirection)
+void UGrapplingHookRCO::ServerReportGrappleFired_Implementation(AGrapplingHookTool* Tool, const FVector& FireLocation, const FVector& FireVelocity)
 {
 	if (!Tool)
 	{
 		return;
 	}
-	
-	if (!Tool->GrappleProjectile)
-	{
-		// Bail out if some necessary stuff doesn't exist yet (may happen for clients somehow)
-		AFGCharacterPlayer* Player = Tool->GetInstigatorCharacter();
-		if (!Player)
-		{
-			return;
-		}
-		UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent();
-		if (!Movement)
-		{
-			return;	
-		}
-		
-		FVector SourceLocation = ShootingSourceLocation;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(Player);
-
-		
-		if (FHitResult HitResult;
-			GetWorld()->LineTraceSingleByProfile(HitResult,
-				ShootingSourceLocation,
-				ShootingSourceLocation + PlayerAimDirection * 150,
-				"Projectile", QueryParams))
-		{
-			SourceLocation = HitResult.Location; 
-		}
-		else
-		{
-			SourceLocation = ShootingSourceLocation + PlayerAimDirection * 150;
-		}
-
-		// Take player's velocity projected on shooting vector, so the projectile inherits player speed in that direction (so we never have a situation when player is faster than the projectile, unless terminal velocity is involved) 
-		const FVector PlayerVelocity = Movement->Velocity;
-		const FVector PlayerVelocityOnShootingDir = PlayerVelocity.ProjectOnToNormal(PlayerAimDirection);
-		
-		Tool->GrappleProjectile = GetWorld()->SpawnActor<AGrappleProjectile>(Tool->GrappleProjectileClass);
-		Tool->GrappleProjectile->SetActorLocation(SourceLocation);
-		Tool->GrappleProjectile->SetInitialVelocity(PlayerAimDirection * Tool->GetInitialHookVelocity() + PlayerVelocityOnShootingDir);
-		Tool->GrappleProjectile->OnProjectileImpactEvent.AddDynamic(Tool, &AGrapplingHookTool::OnGrappleHitSurface);
-		Tool->OnRep_GrappleProjectile();
-	}
-}
-
-void UGrapplingHookRCO::ServerRetractGrapple_Implementation(AGrapplingHookTool* Tool, const FVector& ReleaseVelocity)
-{
-	if (!Tool)
-	{
-		return;
-	}
-	if (Tool->GrappleProjectile)
-	{
-		Tool->GrappleProjectile->Destroy();
-		Tool->GrappleProjectile = nullptr;
-	}
-	Tool->ApplyReleaseVelocity(ReleaseVelocity);
-	Tool->SetClientAuthoritativeMovement(false);
+	Tool->GrappleFireLocation = FireLocation;
+	Tool->GrappleFireVelocity = FireVelocity;
+	Tool->bGrappleProjectileActive = true;
 	Tool->bGrappleAttached = false;
-	Tool->DesiredCableLength = 0;
+	Tool->DesiredCableLength = 0.f;
+	Tool->GrappleForcePointLocation = FVector::ZeroVector;
+	Tool->GrappleForcePointRotation = FRotator::ZeroRotator;
+	Tool->OnRep_ProjectileActive();
+}
+
+void UGrapplingHookRCO::ServerReportGrappleAttached_Implementation(AGrapplingHookTool* Tool, const FVector& AnchorLocation, const FRotator& AnchorRotation, float DesiredLength)
+{
+	if (!Tool)
+	{
+		return;
+	}
+	const float MaxLength = Tool->GetMaxCableLength();
+	Tool->ReplicatedReelSpeedMax = Tool->UpgradesSpeed.GetMaximumValue(Tool);
+	Tool->GrappleForcePointLocation = AnchorLocation;
+	Tool->GrappleForcePointRotation = AnchorRotation;
+	Tool->bGrappleAttached = true;
+	Tool->bGrappleProjectileActive = true;
+	Tool->DesiredCableLength = FMath::Clamp(DesiredLength, 0.f, MaxLength * 1.5f);
+	Tool->SetClientAuthoritativeMovement(true);
+	Tool->OnRep_ProjectileActive();
+	Tool->OnRep_GrappleForcePointLocation();
+	Tool->OnRep_GrappleAttached();
 	Tool->OnRep_DesiredCableLength();
 }
 
-void UGrapplingHookRCO::ServerProcessDesiredCableLengthQueries_Implementation(AGrapplingHookTool* Tool, float QueriedChange, float DeltaSeconds)
+void UGrapplingHookRCO::ServerReportGrappleRetracted_Implementation(AGrapplingHookTool* Tool, const FVector& ReleaseVelocity)
 {
 	if (!Tool)
 	{
 		return;
 	}
-	
-	if (!FMath::IsNearlyZero(QueriedChange))
+	Tool->ApplyReleaseVelocity(ReleaseVelocity);
+	Tool->SetClientAuthoritativeMovement(false);
+	Tool->bGrappleProjectileActive = false;
+	Tool->bGrappleAttached = false;
+	Tool->DesiredCableLength = 0.f;
+	Tool->GrappleForcePointLocation = FVector::ZeroVector;
+	Tool->OnRep_ProjectileActive();
+	Tool->OnRep_GrappleAttached();
+	Tool->OnRep_DesiredCableLength();
+}
+
+void UGrapplingHookRCO::ServerSetDesiredCableLength_Implementation(AGrapplingHookTool* Tool, float NewLength)
+{
+	if (!Tool)
 	{
-		float TargetLength = Tool->DesiredCableLength + QueriedChange * DeltaSeconds;
-		if (QueriedChange < 0)
+		return;
+	}
+	Tool->DesiredCableLength = FMath::Clamp(NewLength, 0.f, Tool->GetMaxCableLength() * 1.5f);
+	Tool->OnRep_DesiredCableLength();
+}
+
+void UGrapplingHookRCO::ServerReportGrappleVelocity_Implementation(AGrapplingHookTool* Tool, const FVector& Velocity)
+{
+	if (!Tool || !Tool->bGrappleAttached)
+	{
+		return;
+	}
+	if (const AFGCharacterPlayer* Character = Tool->GetInstigatorCharacter())
+	{
+		if (UFGCharacterMovementComponent* Movement = Character->GetFGMovementComponent())
 		{
-			TargetLength = FMath::Min(Tool->DesiredCableLength, // decreasing length must never make it larger than current
-				FMath::Max(Tool->GetDistanceToGrappleForcePoint() - 600, // length cannot be too smaller than actual length to avoid slingshot situation  
-				TargetLength)); 
+			Movement->Velocity = Velocity;
 		}
-		else
-		{
-			TargetLength = FMath::Min(Tool->GetMaxCableLength(), TargetLength); // length cannot exceed certain maximum value
-		}
-		
-		Tool->DesiredCableLength = TargetLength;
-		Tool->DesiredCableLengthControlQuery = 0;
-		Tool->OnRep_DesiredCableLength();
 	}
 }
 
@@ -171,13 +151,9 @@ float FGrapplingHookUpgradesChain::GetMaximumValue(UWorld* Context) const
 	}
 	for (const TTuple<TSubclassOf<UFGSchematic>, float>& Upgrade : Upgrades)
 	{
-		if (SchematicManager->IsSchematicPurchased(Upgrade.Key))
+		if (Upgrade.Key && SchematicManager->IsSchematicPurchased(Upgrade.Key))
 		{
-			ActiveValue = Upgrade.Value;
-		}
-		else
-		{
-			break;
+			ActiveValue = FMath::Max(ActiveValue, Upgrade.Value);
 		}
 	}
 	return ActiveValue;
@@ -191,95 +167,106 @@ void AGrapplingHookTool::Tick(const float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (IsLocalInstigator())
+	const bool bOwner = IsLocalInstigator();
+	const bool bAuthority = HasAuthority();
+
+	UpdateDeathState();
+	if (bOwnerDead)
+	{
+		return;
+	}
+
+	if (bOwner)
 	{
 		ClientTickGrapple(DeltaSeconds);
 	}
-	if (HasAuthority())
+	if (bAuthority)
 	{
 		ServerTickGrapple(DeltaSeconds);
 	}
 
-	if (!HasAuthority() && bGrappleAttached && GrappleProjectile && !GrappleForcePointLocation.IsNearlyZero())
+	if (!bOwner && GetNetMode() != NM_DedicatedServer)
 	{
-		if (USceneComponent* ProjectileRoot = GrappleProjectile->GetRootComponent(); ProjectileRoot && ProjectileRoot->GetAttachParent())
+		if (bGrappleAttached && GrappleProjectile && !GrappleForcePointLocation.IsNearlyZero())
 		{
-			ProjectileRoot->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+			if (USceneComponent* ProjectileRoot = GrappleProjectile->GetRootComponent(); ProjectileRoot && ProjectileRoot->GetAttachParent())
+			{
+				ProjectileRoot->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+			}
+			GrappleProjectile->SetActorLocationAndRotation(GrappleForcePointLocation, GrappleForcePointRotation);
 		}
-		GrappleProjectile->SetActorLocationAndRotation(GrappleForcePointLocation, GrappleForcePointRotation);
+		UpdateCableVisual();
+	}
+}
+
+void AGrapplingHookTool::UpdateDeathState()
+{
+	bool bDead = false;
+	if (const AFGCharacterPlayer* Character = GetInstigatorCharacter())
+	{
+		if (const UFGHealthComponent* Health = Character->GetHealthComponent())
+		{
+			bDead = Health->IsDead();
+		}
+	}
+
+	if (bDead == bOwnerDead)
+	{
+		return;
+	}
+	bOwnerDead = bDead;
+
+	if (bDead)
+	{
+		if (IsLocalInstigator())
+		{
+			RetractGrapple();
+			if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+			{
+				SetInputContextRegistered(Controller, false);
+			}
+		}
+		else if (HasAuthority())
+		{
+			SetClientAuthoritativeMovement(false);
+		}
+	}
+	else
+	{
+		if (IsLocalInstigator())
+		{
+			if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+			{
+				SetInputContextRegistered(Controller, true);
+			}
+		}
 	}
 }
 
 void AGrapplingHookTool::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	DOREPLIFETIME(AGrapplingHookTool, GrappleProjectile);
+	DOREPLIFETIME(AGrapplingHookTool, bGrappleProjectileActive);
+	DOREPLIFETIME(AGrapplingHookTool, GrappleFireLocation);
+	DOREPLIFETIME(AGrapplingHookTool, GrappleFireVelocity);
 	DOREPLIFETIME(AGrapplingHookTool, DesiredCableLength);
 	DOREPLIFETIME(AGrapplingHookTool, bGrappleAttached);
 	DOREPLIFETIME(AGrapplingHookTool, GrappleForcePointLocation);
 	DOREPLIFETIME(AGrapplingHookTool, GrappleForcePointRotation);
+	DOREPLIFETIME(AGrapplingHookTool, ReplicatedReelSpeedMax);
 }
 
 void AGrapplingHookTool::ServerTickGrapple_Implementation(const float DeltaSeconds)
 {
-	if (!GrappleProjectile)
+	if (IsLocalInstigator())
 	{
 		return;
 	}
-
-	// While grapple is yet flying towards its target
 	if (!bGrappleAttached)
 	{
-		// Return grapple if the shot exceeded maximum allowed cable length
-		const float ActualCurrentCableLength = GetDistanceToGrappleForcePoint();
-		if (ActualCurrentCableLength > GetMaxCableLength())
-		{
-			RetractGrapple();
-			return;
-		}
-
-		// Update cable length until max length is reached (or projectile hits something)
-		SetCableLength(FMath::Max(0.1, FMath::Min(GetMaxCableLength(), ActualCurrentCableLength))); 
-	}
-
-	if (bGrappleAttached)
-	{
-		// If player is over tearing distance, retract the grapple
-		if (const float DistanceOvershoot = GetDistanceToGrappleForcePoint() - DesiredCableLength;
-			DistanceOvershoot >= GetTearingDistance())
-		{
-			RetractGrapple();
-			return;
-		}
-
-		SetClientAuthoritativeMovement(true);
-
-		if (!IsLocalInstigator())
-		{
-			TickTensionForce(DeltaSeconds);
-		}
-
-		// Keep visual cable length representing desired length (resulting value is smaller so cable does not appear loose when it should be tense)
-		SetCableLength(FMath::Max(50, DesiredCableLength - 250));
-	}
-}
-
-void AGrapplingHookTool::SetCableLength_Implementation(const float NewLength)
-{
-	if (!GrappleProjectile || !GrappleProjectile->CableComponent)
-	{
 		return;
 	}
-
-	// Immediately after a shot, cable behaves erratically on clients.
-	// We bandaid this by having a straight cable instead of such broken visuals. 
-	if (GetNetMode() == NM_Client && !bGrappleAttached)
-	{
-		GrappleProjectile->CableComponent->CableLength = 0;
-		return;
-	}
-
-	GrappleProjectile->CableComponent->CableLength = NewLength;
+	SetClientAuthoritativeMovement(true);
 }
 
 void AGrapplingHookTool::LoadFromItemState_Implementation(const FFGDynamicStruct& itemState)
@@ -301,10 +288,14 @@ void AGrapplingHookTool::Equip(AFGCharacterPlayer* Character)
 {
 	Super::Equip(Character);
 
-	AFGPlayerController* Controller = Character->GetFGPlayerController(); 
+	if (HasAuthority())
+	{
+		ReplicatedReelSpeedMax = UpgradesSpeed.GetMaximumValue(this);
+	}
+
+	AFGPlayerController* Controller = Character->GetFGPlayerController();
 	SetInputContextRegistered(Controller, true);
 
-	// Create crosshair highlight widget for local tool's owner
 	if (Controller && Controller->IsLocalController())
 	{
 		RefreshGrappleConfig();
@@ -350,7 +341,7 @@ void AGrapplingHookTool::UnEquip()
 			ClearEquipmentActionBindings();
 		}
 	}
-	
+
 	Super::UnEquip();
 }
 
@@ -375,32 +366,57 @@ void AGrapplingHookTool::AddEquipmentActionBindings()
 
 void AGrapplingHookTool::RetractGrapple()
 {
-	if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+	FVector ReleaseVelocity = FVector::ZeroVector;
+	if (const AFGCharacterPlayer* Player = GetInstigatorCharacter())
 	{
-		if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+		if (const UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent())
 		{
-			FVector ReleaseVelocity = FVector::ZeroVector;
-			if (const AFGCharacterPlayer* Player = GetInstigatorCharacter())
+			ReleaseVelocity = Movement->Velocity;
+		}
+	}
+
+	const bool bWasActive = bLocalProjectileActive || GrappleProjectile != nullptr;
+
+	DestroyProjectile();
+	SetClientAuthoritativeMovement(false);
+
+	bLocalProjectileActive = false;
+	bLocalAttached = false;
+	bAnchorIsDynamic = false;
+	LocalDesiredCableLength = 0.f;
+	LocalAnchorLocation = FVector::ZeroVector;
+	LocalAnchorRotation = FRotator::ZeroRotator;
+	LocalFlightTime = 0.f;
+	ReassertOwnerState();
+
+	if (bWasActive)
+	{
+		OnDesiredCableLengthChanged(0.f);
+	}
+
+	if (!HasAuthority())
+	{
+		if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+		{
+			if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
 			{
-				if (const UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent())
-				{
-					ReleaseVelocity = Movement->Velocity;
-				}
-			}
-			RCO->ServerRetractGrapple(this, ReleaseVelocity);
-			if (!bRetracted)
-			{
-				bRetracted = true;
-				OnGrappleStartedRetracting();
-				OnGrappleFinishedRetracting();
+				RCO->ServerReportGrappleRetracted(this, ReleaseVelocity);
 			}
 		}
+	}
+
+	if (!bRetracted)
+	{
+		bRetracted = true;
+		OnGrappleStartedRetracting();
+		OnGrappleFinishedRetracting();
 	}
 }
 
 void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 {
-	// Periodic snap-to-max check while the tool is held.
+	ReassertOwnerState();
+
 	ConfigSnapCheckAccumulator += DeltaSeconds;
 	if (ConfigSnapCheckAccumulator >= 5.0f)
 	{
@@ -459,26 +475,77 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 	}
 	bWasAttachedForHint = bGrappleAttached;
 
-	if (bGrappleAttached)
+	if (GrappleProjectile && !bLocalAttached)
 	{
-		TickTensionForce(DeltaSeconds);
-
-		// Apply length control queries to desired cable length
-		if (!FMath::IsNearlyZero(DesiredCableLengthControlQuery))
+		LocalFlightTime += DeltaSeconds;
+		const float FlightDistance = GetDistanceToGrappleForcePoint();
+		if (FlightDistance > GetMaxCableLength() || LocalFlightTime > 6.f)
 		{
-			if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+			RetractGrapple();
+		}
+	}
+
+	if (bLocalAttached)
+	{
+		if (bAnchorIsDynamic && GrappleProjectile)
+		{
+			LocalAnchorLocation = GrappleProjectile->GetActorLocation();
+			GrappleForcePointLocation = LocalAnchorLocation;
+		}
+
+		if (GetDistanceToGrappleForcePoint() - LocalDesiredCableLength >= GetTearingDistance())
+		{
+			RetractGrapple();
+		}
+		else
+		{
+			TickTensionForce(DeltaSeconds);
+
+			if (!HasAuthority())
 			{
-				if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+				const AFGCharacterPlayer* VelocityChar = GetInstigatorCharacter();
+				const UFGCharacterMovementComponent* VelocityMove = VelocityChar ? VelocityChar->GetFGMovementComponent() : nullptr;
+				AFGPlayerController* VelocityController = Cast<AFGPlayerController>(GetInstigatorController());
+				UGrapplingHookRCO* VelocityRCO = VelocityController ? VelocityController->GetRemoteCallObjectOfClass<UGrapplingHookRCO>() : nullptr;
+				if (VelocityMove && VelocityRCO)
 				{
-					// Length adjustment is processed on server first, and is replicated back to client afterwards
-					RCO->ServerProcessDesiredCableLengthQueries(this, DesiredCableLengthControlQuery, DeltaSeconds);
-					DesiredCableLengthControlQuery = 0;
+					VelocityRCO->ServerReportGrappleVelocity(this, VelocityMove->Velocity);
+				}
+			}
+
+			if (!FMath::IsNearlyZero(DesiredCableLengthControlQuery))
+			{
+				float TargetLength = LocalDesiredCableLength + DesiredCableLengthControlQuery * DeltaSeconds;
+				if (DesiredCableLengthControlQuery < 0)
+				{
+					TargetLength = FMath::Min(LocalDesiredCableLength,
+						FMath::Max(GetDistanceToGrappleForcePoint() - 600.f, TargetLength));
+				}
+				else
+				{
+					TargetLength = FMath::Min(GetMaxCableLength(), TargetLength);
+				}
+				LocalDesiredCableLength = TargetLength;
+				DesiredCableLength = TargetLength;
+				DesiredCableLengthControlQuery = 0;
+				OnDesiredCableLengthChanged(GetMaxCableLength() > 0 ? LocalDesiredCableLength / GetMaxCableLength() : 0.f);
+
+				if (!HasAuthority())
+				{
+					if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+					{
+						if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+						{
+							RCO->ServerSetDesiredCableLength(this, LocalDesiredCableLength);
+						}
+					}
 				}
 			}
 		}
 	}
 
-	// Update crosshair highlight widget visibility for local player
+	UpdateCableVisual();
+
 	if (CrosshairHighlightWidget)
 	{
 		const AFGCharacterPlayer* Player = GetInstigatorCharacter();
@@ -498,7 +565,7 @@ void AGrapplingHookTool::ClientTickGrapple(const float DeltaSeconds)
 			}
 		}
 		CrosshairHighlightWidget->SetVisibility(bShowCrosshairHighlight ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Hidden);
-	}		
+	}
 }
 
 void AGrapplingHookTool::SetClientAuthoritativeMovement(const bool bEnable)
@@ -534,29 +601,61 @@ void AGrapplingHookTool::ApplyReleaseVelocity(const FVector& ReleaseVelocity)
 
 void AGrapplingHookTool::HandleInput_PrimaryFire()
 {
-	if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+	if (bOwnerDead)
 	{
-		if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
-		{
-			if (!GrappleProjectile) // shoot projectile if didn't yet
-			{
-				const AFGCharacterPlayer* Player = GetInstigatorCharacter();
-				if (!Player)
-				{
-					return;
-				}
+		return;
+	}
+	if (GrappleProjectile)
+	{
+		RetractGrapple();
+		return;
+	}
 
-				bRetracted = false;
-				const FVector PlayerDirection = Player->GetBaseAimRotation().Vector();
-				RCO->ServerShootGrapple(this, GetShootingSourceLocation(), PlayerDirection);
-				OnGrappleFired();
+	const AFGCharacterPlayer* Player = GetInstigatorCharacter();
+	if (!Player)
+	{
+		return;
+	}
+	const UFGCharacterMovementComponent* Movement = Player->GetFGMovementComponent();
+
+	const FVector FireLocation = GetShootingSourceLocation();
+	const FVector AimDirection = Player->GetBaseAimRotation().Vector();
+
+	FVector FireVelocity = AimDirection * GetInitialHookVelocity();
+	if (Movement)
+	{
+		FireVelocity += Movement->Velocity.ProjectOnToNormal(AimDirection);
+	}
+
+	bRetracted = false;
+	bLocalProjectileActive = true;
+	bLocalAttached = false;
+	LocalAnchorLocation = FVector::ZeroVector;
+	LocalAnchorRotation = FRotator::ZeroRotator;
+	LocalDesiredCableLength = 0.f;
+	LocalFireLocation = FireLocation;
+	LocalFireVelocity = FireVelocity;
+	LocalFlightTime = 0.f;
+	ReassertOwnerState();
+
+	SpawnSimulatedProjectile(FireLocation, FireVelocity);
+
+	if (!HasAuthority())
+	{
+		if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+		{
+			if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+			{
+				RCO->ServerReportGrappleFired(this, FireLocation, FireVelocity);
 			}
 			else
 			{
-				RetractGrapple();
+				UE_LOG(LogAsgGrapple, Warning, TEXT("[%s] fire: RCO unavailable, server not informed"), *GrappleNetContext());
 			}
 		}
 	}
+
+	OnGrappleFired();
 }
 
 void AGrapplingHookTool::HandleInput_RetractCable()
@@ -583,7 +682,14 @@ void AGrapplingHookTool::HandleInput_ExtendCable()
 
 void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds)
 {
-	const float ActualCurrentCableLength = GetDistanceToGrappleForcePoint();
+	if (!bGrappleAttached)
+	{
+		return;
+	}
+	if (DesiredCableLength <= KINDA_SMALL_NUMBER || GrappleForcePointLocation.IsNearlyZero())
+	{
+		return;
+	}
 
 	const AFGCharacterPlayer* ToolOwner = GetInstigatorCharacter();
 	if (!ToolOwner)
@@ -596,40 +702,34 @@ void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds)
 		return;
 	}
 
+	const float ActualCurrentCableLength = GetDistanceToGrappleForcePoint();
 	const FVector TensionForceDirection = (GetGrappleForcePoint() - ToolOwner->GetActorLocation()).GetSafeNormal();
 
 	if (ActualCurrentCableLength >= DesiredCableLength)
 	{
-		// Tension force is player's inverse velocity projected onto grapple direction vector
 		const FVector TensionForce = (-Movement->GetVelocity()).ProjectOnTo(TensionForceDirection);
 
-		FVector DesiredVelocity = Movement->Velocity;
+		FVector TensionDelta = FVector::ZeroVector;
 
-		// Apply tension force, if its direction is facing grapple point
 		if (FMath::IsNearlyEqual(FVector::DotProduct(TensionForceDirection, TensionForce.GetSafeNormal()), 1.0f, 1e-06))
 		{
-			// In air, we make the rope feel stretchable by applying the force over time instead of instantly
-			// On the ground however it's a different story, because player has friction, tfw much more resistance to external forces - we apply full force immediately.
 			const float TimeMultiplier = Movement->MovementMode == MOVE_Walking ? 1 : DeltaSeconds*3;
-			DesiredVelocity += TensionForce * TimeMultiplier;
+			TensionDelta += TensionForce * TimeMultiplier;
 		}
 
-		// If cable is longer than desired length allows, tension should pull player towards grapple point
 		if (ActualCurrentCableLength > DesiredCableLength)
 		{
-			const float ExcessDistance = ActualCurrentCableLength - DesiredCableLength;
-			DesiredVelocity += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
+			const float ExcessDistance = FMath::Min(ActualCurrentCableLength - DesiredCableLength, GetTearingDistance());
+			TensionDelta += TensionForceDirection * ExcessDistance * DeltaSeconds * 10;
 		}
 
-		// Apply velocity to movement comp
-		Movement->Velocity = DesiredVelocity;
+		const float NetworkCompensation = HasAuthority() ? 1.f : CVarGrappleClientCompensation.GetValueOnGameThread();
+		Movement->Velocity += TensionDelta * NetworkCompensation;
 
-		// Help player to automatically take off the ground if floor normal to tension force angle is less than ~43 degrees
 		if (Movement->MovementMode == MOVE_Walking)
 		{
 			const float Dot = FMath::Clamp(FVector::DotProduct(Movement->CurrentFloor.HitResult.Normal, TensionForceDirection), -1.0f, 1.0f);
-			const float FloorNormalToTensionDirAngle = FMath::Acos(Dot);
-			if (FloorNormalToTensionDirAngle < (PI/4 - PI/64))
+			if (FMath::Acos(Dot) < (PI/4 - PI/64))
 			{
 				Movement->MovementMode = MOVE_Falling;
 				Movement->CurrentFloor.Clear();
@@ -640,19 +740,58 @@ void AGrapplingHookTool::TickTensionForce(const float DeltaSeconds)
 
 void AGrapplingHookTool::OnGrappleHitSurface(const FHitResult& HitResult)
 {
-	GrappleForcePointLocation = HitResult.Location;
-	GrappleForcePointRotation = GrappleProjectile ? GrappleProjectile->GetActorRotation() : FRotator::ZeroRotator;
-	bGrappleAttached = true;
-	DesiredCableLength = GetDistanceToGrappleForcePoint();
-	OnRep_GrappleAttached();
-	OnRep_GrappleForcePointLocation();
-	OnRep_DesiredCableLength();
+	if (bLocalAttached)
+	{
+		return;
+	}
+
+	const AFGCharacterPlayer* Player = GetInstigatorCharacter();
+	const FVector OwnerLocation = Player ? Player->GetActorLocation() : GetActorLocation();
+
+	UPrimitiveComponent* HitComponent = HitResult.GetComponent();
+	bAnchorIsDynamic = HitComponent && HitComponent->Mobility == EComponentMobility::Movable;
+
+	LocalAnchorLocation = HitResult.Location;
+	LocalAnchorRotation = GrappleProjectile ? GrappleProjectile->GetActorRotation() : FRotator::ZeroRotator;
+	bLocalAttached = true;
+	LocalDesiredCableLength = FVector::Distance(OwnerLocation, LocalAnchorLocation);
+	LocalFlightTime = 0.f;
+	ReassertOwnerState();
+
+	if (GrappleProjectile)
+	{
+		GrappleProjectile->AttachToAnchor(LocalAnchorLocation, LocalAnchorRotation,
+			bAnchorIsDynamic ? HitComponent : nullptr, HitResult.BoneName);
+		if (GrappleProjectile->CableComponent)
+		{
+			GrappleProjectile->CableComponent->CableGravityScale = CableGravityScaleAfterHit;
+		}
+	}
+
+	OnDesiredCableLengthChanged(GetMaxCableLength() > 0 ? LocalDesiredCableLength / GetMaxCableLength() : 0.f);
+
+	if (!HasAuthority())
+	{
+		if (AFGPlayerController* Controller = Cast<AFGPlayerController>(GetInstigatorController()))
+		{
+			if (UGrapplingHookRCO* RCO = Controller->GetRemoteCallObjectOfClass<UGrapplingHookRCO>())
+			{
+				RCO->ServerReportGrappleAttached(this, LocalAnchorLocation, LocalAnchorRotation, LocalDesiredCableLength);
+			}
+		}
+	}
+
+	OnGrappleAttached();
 }
 
 float AGrapplingHookTool::GetDistanceToGrappleForcePoint() const
 {
 	const AFGCharacterPlayer* ToolOwner = GetInstigatorCharacter();
-	if (!GrappleProjectile || !ToolOwner)
+	if (!ToolOwner)
+	{
+		return 0;
+	}
+	if (!bGrappleAttached && !GrappleProjectile)
 	{
 		return 0;
 	}
@@ -663,18 +802,22 @@ float AGrapplingHookTool::GetDistanceToGrappleForcePoint() const
 
 FVector AGrapplingHookTool::GetGrappleForcePoint() const
 {
-	if (!GrappleProjectile)
-	{
-		return RootComponent->GetComponentLocation();
-	}
-
 	if (bGrappleAttached && !GrappleForcePointLocation.IsNearlyZero())
 	{
 		return GrappleForcePointLocation;
 	}
 
 	// TODO: Implement support for cable turns
-	return GrappleProjectile->GetActorLocation();
+	if (GrappleProjectile)
+	{
+		return GrappleProjectile->GetActorLocation();
+	}
+
+	if (RootComponent)
+	{
+		return RootComponent->GetComponentLocation();
+	}
+	return GetActorLocation();
 }
 
 float AGrapplingHookTool::GetDesiredCableLengthQueries() const
@@ -684,7 +827,10 @@ float AGrapplingHookTool::GetDesiredCableLengthQueries() const
 
 float AGrapplingHookTool::GetCableLengthControlStep() const
 {
-	return UpgradesSpeed.GetActiveValue(this);
+	const float Maximum = (!HasAuthority() && ReplicatedReelSpeedMax > 0.f)
+		? ReplicatedReelSpeedMax
+		: UpgradesSpeed.GetMaximumValue(this);
+	return FMath::Lerp(UpgradesSpeed.BaseValue, Maximum, FMath::Clamp(UpgradesSpeed.ConfigRatio, 0.f, 1.f));
 }
 
 float AGrapplingHookTool::GetMaxCableLength() const
@@ -710,7 +856,6 @@ void AGrapplingHookTool::SetGrappleConfig(float NewReelSpeedRatio, float NewMaxC
 	Config->MaxCableLengthRatio = FMath::Clamp(NewMaxCableLengthRatio, 0.f, 1.f);
 	Config->EjectionSpeedRatio = FMath::Clamp(NewEjectionSpeedRatio, 0.f, 1.f);
 
-	// Record the max each ratio was set against (drives the snap-on-research).
 	Config->ReelSpeedMaxSeen = UpgradesSpeed.GetMaximumValue(this);
 	Config->MaxCableLengthMaxSeen = UpgradesLength.GetMaximumValue(this);
 	Config->EjectionSpeedMaxSeen = UpgradesPower.GetMaximumValue(this);
@@ -752,7 +897,6 @@ bool AGrapplingHookTool::ReconcileResearchSnap()
 		const float CurrentMax = Chain.GetMaximumValue(this);
 		if (CurrentMax > MaxSeen + KINDA_SMALL_NUMBER)
 		{
-			// Research just raised this stat's ceiling - give the player the full new value to give a feel of the new upgrade.
 			Ratio = 1.f;
 			MaxSeen = CurrentMax;
 			bChanged = true;
@@ -837,7 +981,6 @@ USceneComponent* AGrapplingHookTool::GetCableAttachComponent_Implementation() co
 	return RootComponent;
 }
 
-// ReSharper disable once CppMemberFunctionMayBeConst
 void AGrapplingHookTool::SetInputContextRegistered(AFGPlayerController* Controller, const bool bRegistered)
 {
 	if (!Controller)
@@ -847,49 +990,220 @@ void AGrapplingHookTool::SetInputContextRegistered(AFGPlayerController* Controll
 	Controller->SetMappingContextBoundWithHandle(GrappleInputContextHandle, GrappleInputContext, bRegistered);
 }
 
-void AGrapplingHookTool::OnRep_GrappleProjectile()
+void AGrapplingHookTool::SpawnSimulatedProjectile(const FVector& FireLocation, const FVector& FireVelocity)
+{
+	UWorld* World = GetWorld();
+	if (!World || !GrappleProjectileClass)
+	{
+		UE_LOG(LogAsgGrapple, Warning, TEXT("[%s] SpawnSimulatedProjectile aborted (world=%d class=%d)"),
+			*GrappleNetContext(), World != nullptr, GrappleProjectileClass != nullptr);
+		return;
+	}
+
+	AFGCharacterPlayer* Player = GetInstigatorCharacter();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = Player;
+
+	GrappleProjectile = World->SpawnActor<AGrappleProjectile>(GrappleProjectileClass, FireLocation, FireVelocity.Rotation(), SpawnParams);
+	if (!GrappleProjectile)
+	{
+		UE_LOG(LogAsgGrapple, Warning, TEXT("[%s] SpawnSimulatedProjectile failed to spawn"), *GrappleNetContext());
+		return;
+	}
+
+	GrappleProjectile->ConfigureAsSimulated(Player);
+	if (Player)
+	{
+		if (UCapsuleComponent* Capsule = Player->GetCapsuleComponent())
+		{
+			Capsule->IgnoreActorWhenMoving(GrappleProjectile, true);
+		}
+	}
+	GrappleProjectile->SetInitialVelocity(FireVelocity);
+	GrappleProjectile->OnProjectileImpactEvent.AddDynamic(this, &AGrapplingHookTool::OnGrappleHitSurface);
+	if (IsLocalInstigator())
+	{
+		GrappleProjectile->SetFirstPersonCableMaterial();
+	}
+	if (GrappleProjectile->CableComponent)
+	{
+		GrappleProjectile->CableComponent->SetAttachEndToComponent(GetCableAttachComponent(), CableAttachComponentSocket);
+		GrappleProjectile->CableComponent->CableGravityScale = CableGravityScaleBeforeHit;
+	}
+}
+
+void AGrapplingHookTool::SpawnCosmeticProjectile(const FVector& FireLocation, const FVector& FireVelocity)
+{
+	UWorld* World = GetWorld();
+	if (!World || !GrappleProjectileClass)
+	{
+		return;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = GetInstigatorCharacter();
+
+	GrappleProjectile = World->SpawnActor<AGrappleProjectile>(GrappleProjectileClass, FireLocation, FireVelocity.Rotation(), SpawnParams);
+	if (!GrappleProjectile)
+	{
+		return;
+	}
+
+	GrappleProjectile->ConfigureAsCosmetic();
+	GrappleProjectile->SetInitialVelocity(FireVelocity);
+	if (GrappleProjectile->CableComponent)
+	{
+		GrappleProjectile->CableComponent->SetAttachEndToComponent(GetCableAttachComponent(), CableAttachComponentSocket);
+		GrappleProjectile->CableComponent->CableGravityScale = bGrappleAttached ? CableGravityScaleAfterHit : CableGravityScaleBeforeHit;
+	}
+}
+
+void AGrapplingHookTool::DestroyProjectile()
 {
 	if (GrappleProjectile)
 	{
-		GrappleProjectile->CableComponent->CableGravityScale = bGrappleAttached ? CableGravityScaleAfterHit : CableGravityScaleBeforeHit;
-		GrappleProjectile->CableComponent->SetAttachEndToComponent(GetCableAttachComponent(), CableAttachComponentSocket);
-		if (IsLocalInstigator())
+		if (AFGCharacterPlayer* Player = GetInstigatorCharacter())
 		{
-			GrappleProjectile->SetFirstPersonCableMaterial();
+			if (UCapsuleComponent* Capsule = Player->GetCapsuleComponent())
+			{
+				Capsule->IgnoreActorWhenMoving(GrappleProjectile, false);
+			}
+		}
+		GrappleProjectile->OnProjectileImpactEvent.RemoveDynamic(this, &AGrapplingHookTool::OnGrappleHitSurface);
+		GrappleProjectile->Destroy();
+		GrappleProjectile = nullptr;
+	}
+}
+
+void AGrapplingHookTool::ReassertOwnerState()
+{
+	bGrappleProjectileActive = bLocalProjectileActive;
+	bGrappleAttached = bLocalAttached;
+	GrappleForcePointLocation = LocalAnchorLocation;
+	GrappleForcePointRotation = LocalAnchorRotation;
+	DesiredCableLength = LocalDesiredCableLength;
+	GrappleFireLocation = LocalFireLocation;
+	GrappleFireVelocity = LocalFireVelocity;
+}
+
+void AGrapplingHookTool::UpdateCableVisual()
+{
+	if (!GrappleProjectile || !GrappleProjectile->CableComponent)
+	{
+		return;
+	}
+
+	if (bGrappleAttached)
+	{
+		GrappleProjectile->CableComponent->CableLength = FMath::Max(50.f, DesiredCableLength - 250.f);
+	}
+	else
+	{
+		const USceneComponent* AttachComp = GetCableAttachComponent();
+		const float StraightLength = AttachComp
+			? FVector::Distance(GrappleProjectile->GetActorLocation(), AttachComp->GetComponentLocation())
+			: 0.f;
+		GrappleProjectile->CableComponent->CableLength = StraightLength;
+	}
+}
+
+FString AGrapplingHookTool::GrappleNetContext() const
+{
+	const TCHAR* Who = IsLocalInstigator() ? TEXT("OWNER") : (HasAuthority() ? TEXT("SERVER") : TEXT("SIM"));
+	const TCHAR* Mode;
+	switch (GetNetMode())
+	{
+	case NM_Standalone: Mode = TEXT("SP"); break;
+	case NM_DedicatedServer: Mode = TEXT("DS"); break;
+	case NM_ListenServer: Mode = TEXT("LS"); break;
+	case NM_Client: Mode = TEXT("CL"); break;
+	default: Mode = TEXT("?"); break;
+	}
+	return FString::Printf(TEXT("%s/%s"), Who, Mode);
+}
+
+void AGrapplingHookTool::OnRep_ProjectileActive()
+{
+	if (IsLocalInstigator())
+	{
+		return;
+	}
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	if (bGrappleProjectileActive)
+	{
+		if (!GrappleProjectile)
+		{
+			SpawnCosmeticProjectile(GrappleFireLocation, GrappleFireVelocity);
+			bRetracted = false;
 		}
 	}
-	else if (!bRetracted)
+	else
 	{
-		bRetracted = true;
-		OnGrappleStartedRetracting();
-		OnGrappleFinishedRetracting();
+		DestroyProjectile();
+		if (!bRetracted)
+		{
+			bRetracted = true;
+			OnGrappleStartedRetracting();
+			OnGrappleFinishedRetracting();
+		}
 	}
 }
 
 void AGrapplingHookTool::OnRep_GrappleAttached()
 {
+	if (IsLocalInstigator())
+	{
+		return;
+	}
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
 	if (bGrappleAttached && GrappleProjectile)
 	{
-		GrappleProjectile->CableComponent->CableGravityScale = CableGravityScaleAfterHit;
+		if (GrappleProjectile->CableComponent)
+		{
+			GrappleProjectile->CableComponent->CableGravityScale = CableGravityScaleAfterHit;
+		}
+		if (!GrappleForcePointLocation.IsNearlyZero())
+		{
+			GrappleProjectile->AttachToAnchor(GrappleForcePointLocation, GrappleForcePointRotation);
+		}
 		OnGrappleAttached();
-	}
-	else if (!bGrappleAttached && !GrappleProjectile && !bRetracted)
-	{
-		bRetracted = true;
-		OnGrappleStartedRetracting();
-		OnGrappleFinishedRetracting();
 	}
 }
 
 void AGrapplingHookTool::OnRep_DesiredCableLength()
 {
-	OnDesiredCableLengthChanged(DesiredCableLength / GetMaxCableLength());
+	if (IsLocalInstigator())
+	{
+		return;
+	}
+	OnDesiredCableLengthChanged(GetMaxCableLength() > 0 ? DesiredCableLength / GetMaxCableLength() : 0.f);
 }
 
 void AGrapplingHookTool::OnRep_GrappleForcePointLocation()
 {
+	if (IsLocalInstigator())
+	{
+		return;
+	}
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
 	if (bGrappleAttached && GrappleProjectile && !GrappleForcePointLocation.IsNearlyZero())
 	{
-		GrappleProjectile->SetActorLocationAndRotation(GrappleForcePointLocation, GrappleForcePointRotation);
+		GrappleProjectile->AttachToAnchor(GrappleForcePointLocation, GrappleForcePointRotation);
 	}
 }
